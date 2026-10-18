@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pacer · Speed Reading &amp; Touch Typing</title>
+    <meta name="theme-color" content="#FFFDF7" />
+    <meta
+      name="description"
+      content="Pacer — a cheerful local speed reading pacer and touch typing trainer."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌈</text></svg>"
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Quicksand:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+    <script>
+      // Tailwind Play CDN config — extends the pastel rainbow palette.
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              cream: '#FFFDF7',
+              mint: '#A7F3D0',
+              sky: '#BFDBFE',
+              lavender: '#DDD6FE',
+              sunny: '#FDE68A',
+              peach: '#FDBA74',
+              coral: '#FDA4AF',
+              pink: '#FBCFE8'
+            },
+            fontFamily: {
+              display: ['Poppins', 'system-ui', 'sans-serif'],
+              sans: ['Quicksand', 'system-ui', 'sans-serif']
+            },
+            borderRadius: { '4xl': '2rem' }
+          }
+        }
+      };
+    </script>
+    <link rel="stylesheet" href="/css/styles.css" />
+  </head>
+
+  <body>
+    <div class="wrap stack">
+      <header class="stack-sm">
+        <div class="rainbow-bar"></div>
+        <div class="masthead">
+          <div class="logo" aria-hidden="true">🌈</div>
+          <div>
+            <h1 class="title">Pacer</h1>
+            <p class="subtitle">Speed reading &amp; touch typing practice, in cheerful pastel.</p>
+          </div>
+          <div class="spacer"></div>
+          <span id="llama-badge" class="badge badge--muted">checking llama-server…</span>
+        </div>
+
+        <nav class="tablist" role="tablist" aria-label="Pacer sections">
+          <button
+            class="tab"
+            role="tab"
+            id="tab-reading"
+            aria-controls="panel-reading"
+            aria-selected="true"
+            data-tab="reading"
+          >
+            📖 Speed Reading
+          </button>
+          <button
+            class="tab"
+            role="tab"
+            id="tab-typing"
+            aria-controls="panel-typing"
+            aria-selected="false"
+            tabindex="-1"
+            data-tab="typing"
+          >
+            ⌨️ Touch Typing
+          </button>
+          <button
+            class="tab"
+            role="tab"
+            id="tab-analytics"
+            aria-controls="panel-analytics"
+            aria-selected="false"
+            tabindex="-1"
+            data-tab="analytics"
+          >
+            📊 Analytics
+          </button>
+        </nav>
+      </header>
+
+      <!-- ============================ TAB 1 · READING ==================== -->
+      <section
+        id="panel-reading"
+        role="tabpanel"
+        aria-labelledby="tab-reading"
+        class="grid-2"
+      >
+        <div class="card stack-sm">
+          <div class="row-between">
+            <h2 class="card-title"><span class="dot"></span>Reader</h2>
+            <span id="reading-source" class="badge badge--muted">no text yet</span>
+          </div>
+
+          <div id="reader-viewport" class="reader-viewport">
+            <div id="reader-track" class="reader-track">
+              <div id="pacer" class="pacer" aria-hidden="true"></div>
+              <div id="reader-text" class="reader-text"></div>
+            </div>
+          </div>
+
+          <div class="progress" aria-hidden="true">
+            <div id="reading-progress" class="progress__fill"></div>
+          </div>
+
+          <div class="grid-3">
+            <div class="metric">
+              <span class="metric__label">Words read</span>
+              <span class="metric__value" id="reading-words">0</span>
+              <span class="metric__unit" id="reading-words-total">/ 0</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Elapsed</span>
+              <span class="metric__value" id="reading-elapsed">0:00</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Remaining</span>
+              <span class="metric__value" id="reading-remaining">0:00</span>
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="reading-play" class="btn btn--primary">▶︎ Play</button>
+            <button id="reading-reset" class="btn">↺ Reset</button>
+            <div class="spacer"></div>
+            <button id="reading-save" class="btn btn--mint">💾 Save session</button>
+          </div>
+
+          <p class="hint kbd-hint">
+            <kbd>W</kbd> faster · <kbd>S</kbd> slower · <kbd>Space</kbd> play / pause
+            <span class="hint">(hotkeys are ignored while a text field has focus)</span>
+          </p>
+        </div>
+
+        <aside class="card stack-sm">
+          <h2 class="card-title"><span class="dot"></span>Text &amp; pace</h2>
+
+          <label class="label" for="reading-topic">Topic</label>
+          <input
+            id="reading-topic"
+            class="input"
+            type="text"
+            maxlength="200"
+            autocomplete="off"
+            placeholder="otters, kindness, the ocean…"
+          />
+          <button id="reading-generate" class="btn btn--lav">
+            <span class="spinner" id="reading-spinner" hidden></span>
+            <span id="reading-generate-label">✨ Generate text</span>
+          </button>
+          <p id="reading-generate-status" class="hint" aria-live="polite">
+            Uses your local llama-server when available, otherwise a built-in essay.
+          </p>
+
+          <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+          <span class="label">Target length</span>
+          <div class="row">
+            <button id="length-down" class="btn btn--sm" aria-label="Decrease essay length">− 50</button>
+            <div>
+              <span class="big-number" id="length-value">300</span>
+              <span class="metric__unit">words</span>
+            </div>
+            <button id="length-up" class="btn btn--sm" aria-label="Increase essay length">+ 50</button>
+          </div>
+          <input
+            id="length-range"
+            type="range"
+            min="50"
+            max="1200"
+            step="50"
+            value="300"
+            aria-label="Target essay length in words"
+            class="w-full accent-mint"
+          />
+          <p class="hint" id="length-note">Longer passages take the local model more time to write.</p>
+
+          <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+          <span class="label">Target speed</span>
+          <div class="row">
+            <button id="wpm-down" class="btn btn--sm" aria-label="Decrease words per minute">− 10</button>
+            <div>
+              <span class="wpm-display" id="wpm-value">250</span>
+              <span class="metric__unit">wpm</span>
+            </div>
+            <button id="wpm-up" class="btn btn--sm" aria-label="Increase words per minute">+ 10</button>
+          </div>
+          <input
+            id="wpm-range"
+            type="range"
+            min="60"
+            max="900"
+            step="5"
+            value="250"
+            aria-label="Target words per minute"
+            class="w-full accent-lavender"
+          />
+
+          <p class="hint">
+            At <strong id="reading-pace-note">250</strong> wpm this text takes about
+            <strong id="reading-pace-time">0:00</strong>.
+          </p>
+
+          <div class="stack-sm">
+            <span class="label">Offline sample library</span>
+            <div class="row" id="sample-topics"></div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- ============================ TAB 2 · TYPING ===================== -->
+      <section
+        id="panel-typing"
+        role="tabpanel"
+        aria-labelledby="tab-typing"
+        class="stack"
+        hidden
+      >
+        <div class="card stack-sm">
+          <div class="row-between">
+            <h2 class="card-title"><span class="dot"></span>Typing practice</h2>
+            <div class="row">
+              <button class="btn btn--sm" data-typing-mode="words" aria-pressed="true">Common words</button>
+              <button class="btn btn--sm" data-typing-mode="sentences" aria-pressed="false">Sentences</button>
+              <button class="btn btn--sm" data-typing-mode="ai" aria-pressed="false">✨ AI essay</button>
+            </div>
+          </div>
+
+          <div
+            id="typing-viewport"
+            class="typing-viewport"
+            tabindex="0"
+            role="textbox"
+            aria-label="Typing practice area"
+            aria-describedby="typing-help"
+          >
+            <div id="typing-text" class="typing-text"></div>
+          </div>
+          <p id="typing-help" class="hint">
+            Just start typing — the timer begins on your first keystroke. Backspace
+            corrects, but the mistake stays in your accuracy score.
+          </p>
+
+          <div id="typing-result" class="result-card" hidden aria-live="polite"></div>
+
+          <div class="grid-3">
+            <div class="metric">
+              <span class="metric__label">Speed</span>
+              <span class="metric__value" id="typing-wpm">0</span><span class="metric__unit">wpm</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Accuracy</span>
+              <span class="metric__value" id="typing-accuracy">100</span><span class="metric__unit">%</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Errors</span>
+              <span class="metric__value" id="typing-errors">0</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Time</span>
+              <span class="metric__value" id="typing-time">0:00</span>
+            </div>
+          </div>
+
+          <div class="progress" aria-hidden="true">
+            <div id="typing-progress" class="progress__fill"></div>
+          </div>
+
+          <div class="row">
+            <button id="typing-restart" class="btn btn--lav">↺ Restart</button>
+            <button id="typing-new" class="btn btn--mint">🎲 New text</button>
+            <div class="spacer"></div>
+            <button id="typing-save" class="btn">💾 Save result</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title"><span class="dot"></span>Virtual keyboard</h2>
+          <div id="keyboard" class="kbd" aria-hidden="true"></div>
+        </div>
+      </section>
+
+      <!-- =========================== TAB 3 · ANALYTICS =================== -->
+      <section
+        id="panel-analytics"
+        role="tabpanel"
+        aria-labelledby="tab-analytics"
+        class="stack"
+        hidden
+      >
+        <div class="row-between">
+          <h2 class="card-title"><span class="dot"></span>Your progress</h2>
+          <div class="row">
+            <span id="analytics-backend" class="badge badge--muted">history</span>
+            <button id="analytics-refresh" class="btn btn--sm">↻ Refresh</button>
+            <button id="analytics-clear" class="btn btn--sm btn--danger">🗑 Clear history</button>
+          </div>
+        </div>
+
+        <p id="analytics-note" class="hint"></p>
+
+        <div class="grid-3">
+          <div class="metric">
+            <span class="metric__label">Sessions</span>
+            <span class="metric__value" id="stat-sessions">0</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">Typing best</span>
+            <span class="metric__value" id="stat-typing-best">–</span><span class="metric__unit">wpm</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">Typing average</span>
+            <span class="metric__value" id="stat-typing-avg">–</span><span class="metric__unit">wpm</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">Avg accuracy</span>
+            <span class="metric__value" id="stat-accuracy">–</span><span class="metric__unit">%</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">Reading average</span>
+            <span class="metric__value" id="stat-reading-avg">–</span><span class="metric__unit">wpm</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">Practice time</span>
+            <span class="metric__value" id="stat-minutes">0</span><span class="metric__unit">min</span>
+          </div>
+        </div>
+
+        <div id="analytics-empty" class="empty-state" hidden>
+          <span class="empty-state__emoji">🌱</span>
+          <strong>No sessions yet</strong>
+          <span class="hint">Finish a reading or typing run and the colourful charts will appear here.</span>
+        </div>
+
+        <div id="analytics-charts" class="stack">
+          <div class="card">
+            <h2 class="card-title"><span class="dot"></span>Words per minute over time</h2>
+            <div class="chart-wrap"><canvas id="chart-wpm"></canvas></div>
+          </div>
+          <div class="card">
+            <h2 class="card-title"><span class="dot"></span>Typing accuracy progression</h2>
+            <div class="chart-wrap"><canvas id="chart-accuracy"></canvas></div>
+          </div>
+          <div class="card">
+            <h2 class="card-title"><span class="dot"></span>Errors per typing session</h2>
+            <div class="chart-wrap"><canvas id="chart-errors"></canvas></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/reader.js"></script>
+    <script src="/js/typing.js"></script>
+    <script src="/js/analytics.js"></script>
+    <script src="/js/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+node_modules/
+.npm-cache/
+.npm-logs/
+npm-debug.log*
+
+# Runtime session history and its corruption/backup files
+pacer.db
+pacer.db-wal
+pacer.db-shm
+stats.json
+stats.json.tmp
+stats.json.corrupt-*
+stats.json.migrated-*
+
+# Scratch space used by local verification runs
+.test-tmp/
+
+.DS_Store

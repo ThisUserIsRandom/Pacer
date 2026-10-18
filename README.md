@@ -1,0 +1,205 @@
+# Pacer 🌈
+
+A cheerful, local-only **speed reading** and **touch typing** trainer.
+
+Bright pastel rainbow UI (Poppins + Quicksand), a glowing pacer line that sweeps
+the text at your target WPM, character-by-character typing feedback with an
+on-screen keyboard, and Chart.js progress graphs — all served from your machine.
+
+> **Working on the code?** Read [CODE_MAP.md](CODE_MAP.md) first — it documents
+> the module contracts, the data shapes, and the non-obvious gotchas.
+
+```
+Pacer/
+├── app.js                    # Express server (routes, config)
+├── lib/
+│   ├── llama.js              # llama-server client (thinking-off, timeout, validation)
+│   ├── fallback-essays.js    # offline essay library + length scaling
+│   ├── stats-db.js           # SQLite history store (node:sqlite)
+│   ├── stats-store.js        # JSON history store (fallback)
+│   └── stats.js              # picks a backend + migrates old JSON history
+├── public/
+│   ├── index.html            # the three tabs
+│   ├── css/styles.css        # pastel rainbow design system
+│   └── js/                   # api · reader · typing · analytics · main
+├── scripts/
+│   ├── smoke.sh              # endpoint test suite
+│   └── mock-llama.js         # fake llama-server for failure-path testing
+├── pacer.db                  # session history (SQLite, created on first run)
+└── stats.json                # only used if SQLite is unavailable
+```
+
+## Run it
+
+```bash
+npm install --cache ./.npm-cache   # see the note below about the cache path
+npm start
+```
+
+Then open **http://127.0.0.1:3001**.
+
+> **Why `--cache ./.npm-cache`?** On this machine `~/.npm` is read-only, which
+> makes a plain `npm install` fail with `EROFS`. Pointing the cache at a
+> writable directory inside the project fixes it. Once `node_modules` exists you
+> never need to think about it again.
+
+The port defaults to **3001** because **3000 is already taken by Gitea** on this
+machine. Change it with `PORT`:
+
+```bash
+PORT=3002 npm start
+```
+
+Requires **Node 22+** (for the built-in SQLite module).
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3001` | HTTP port |
+| `HOST` | `127.0.0.1` | Bind address (local only) |
+| `LLAMA_URL` | `http://127.0.0.1:8282/v1/chat/completions` | Generation endpoint |
+| `LLAMA_MODELS_URL` | `http://127.0.0.1:8282/v1/models` | Model-id discovery |
+| `LLAMA_MODEL` | *(auto-discovered)* | Force a specific model id |
+| `LLAMA_TIMEOUT_MS` | `120000` | Timeout **for a 300-word essay**; scales up with longer requests |
+| `ESSAY_WORDS` | `300` | Default essay length |
+| `STATS_DB` | `./pacer.db` | SQLite database path |
+| `STATS_FILE` | `./stats.json` | JSON store path (fallback + legacy import source) |
+| `STATS_BACKEND` | `auto` | `auto`, `sqlite`, or `json` |
+
+## Using it
+
+### 📖 Speed Reading
+
+- Type a topic (or tap a chip from the offline sample library) and press
+  **Generate text**.
+- **Length is adjustable** from 50 to 1200 words with the stepper or slider, and
+  your choice is remembered. Longer passages simply take the local model longer
+  to write — the sidebar tells you roughly how long.
+- **`W`** faster · **`S`** slower · **`Space`** play / pause. Shift multiplies
+  the WPM step by 2.5×. Hotkeys are ignored while a text field has focus.
+- Click any word to jump the pacer there. **Save session** logs your target WPM
+  and time to history.
+
+### ⌨️ Touch Typing
+
+- Pick **Common words**, **Sentences**, or **✨ AI essay**. The AI mode reuses
+  whatever the reading tab already generated, so you do not wait twice.
+- Characters turn **mint** when correct and **pastel coral** when wrong; the
+  virtual keyboard highlights the next key and flashes on every press.
+- The timer starts on your first keystroke. **Backspace** corrects a character,
+  but the mistake still counts against your accuracy — so accuracy tracks your
+  keystroke history while WPM reflects the correct characters you ended up with.
+
+### 📊 Analytics
+
+Colourful bar graphs for WPM, typing accuracy, and errors per session, plus
+summary cards. Totals and averages always cover your **complete** history; the
+charts plot the most recent 120 sessions and say so when they are trimming.
+
+## Where your history lives
+
+Session history goes into a local **SQLite** database (`pacer.db`) using Node's
+built-in `node:sqlite` module — **no npm dependency and no native build step**.
+
+| | JSON file | SQLite (default) |
+| --- | --- | --- |
+| Appending a session | rewrites the whole file | one indexed insert |
+| Aggregates | load everything into JS | computed in SQL |
+| Crash safety | temp file + rename | transactions + WAL |
+| History limit | needed a cap | none |
+| New dependencies | none | none |
+
+If `node:sqlite` is unavailable (Node < 22, or a stripped-down build), Pacer
+logs a warning and transparently falls back to the JSON store at `stats.json`.
+Force either one with `STATS_BACKEND=sqlite` or `STATS_BACKEND=json`.
+
+**Upgrading from an older version?** If a `stats.json` with sessions exists, it
+is imported into SQLite on the next start and the old file is kept as
+`stats.json.migrated-<timestamp>`. Re-running is safe — imports are idempotent.
+
+You can inspect the database directly:
+
+```bash
+node --disable-warning=ExperimentalWarning -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync('pacer.db');
+  console.log(db.prepare('SELECT type, COUNT(*) n, ROUND(AVG(wpm),1) avg FROM sessions GROUP BY type').all());
+"
+```
+
+## How generation works
+
+`POST /api/generate` proxies to your local llama-server. A few details worth
+knowing, because they were learned the hard way with a local thinking model:
+
+1. **Thinking is disabled** via `chat_template_kwargs: { enable_thinking: false }`.
+   Without it, a Qwen3-style model can spend its entire token budget on
+   `reasoning_content` and return an **empty** `message.content`. Pacer also
+   detects that exact case if a server ignores the flag.
+2. **The token budget and timeout scale with the requested length.** A 1200-word
+   essay gets roughly 2100 tokens of room and a proportionally longer timeout
+   (measured: 1198 words in 130s on a 35B Q2 model). The UI shows a live elapsed
+   counter and a cancel button.
+3. **Output is validated**: empty text, reasoning-only responses, and anything
+   under half the requested length are rejected.
+4. **Length is normalised** to the target — the model tends to overshoot.
+5. When any of that fails you get a **built-in essay** instead, matched to your
+   topic by keyword, or composed from a pool of topic-aware sentence variants.
+   The app is fully usable with llama-server switched off.
+
+> Offline essays are assembled from templates, so past roughly 600 words they
+> start repeating some phrasing. The UI says so when that happens. The local
+> model has no such limit.
+
+## Tests
+
+```bash
+bash scripts/smoke.sh                  # everything, including one real generation
+SKIP_GENERATE=1 bash scripts/smoke.sh  # fast: skips the ~40s llama round-trip
+WORDS=900 bash scripts/smoke.sh        # verify a different essay length
+BASE=http://127.0.0.1:3002 bash scripts/smoke.sh
+```
+
+The suite checks all static assets, request validation, the stats round-trip,
+paged history, concurrent writes, SQLite integrity (`PRAGMA integrity_check`),
+history clearing, and generation length/output quality.
+
+### Testing the failure paths
+
+`scripts/mock-llama.js` is a fake llama-server that reproduces the awkward
+responses a real local model can produce, so the fallback logic can be tested
+without touching your actual server:
+
+```bash
+npm run mock                          # listens on 127.0.0.1:8283
+
+LLAMA_URL=http://127.0.0.1:8283/v1/chat/completions \
+LLAMA_MODELS_URL=http://127.0.0.1:8283/v1/models \
+LLAMA_TIMEOUT_MS=2500 STATS_DB=/tmp/mock.db \
+PORT=3003 node --disable-warning=ExperimentalWarning app.js
+
+curl -s -X POST http://127.0.0.1:3003/api/generate \
+  -H 'Content-Type: application/json' -d '{"topic":"trap otters"}'
+```
+
+Pick the behaviour with the topic string:
+
+| Topic contains | Mock behaviour | Expected Pacer result |
+| --- | --- | --- |
+| *(anything else)* | clean ~320-word essay | `source: "llama"` |
+| `trap` | empty `content`, long `reasoning_content`, `finish_reason: "length"` | fallback, reason `thinking-only` |
+| `boom` | HTTP 500 | fallback, reason `http-error` |
+| `hang` | never responds | fallback, reason `timeout` |
+| `template` | 400 on `chat_template_kwargs`, succeeds without it | `source: "llama"` (retry worked) |
+| `tiny` | a 17-word "essay" | fallback, reason `too-short` |
+| `markdown` | prose wrapped in headings, bold, bullets, a preamble | `source: "llama"`, cleaned up |
+
+## Notes
+
+- Binds to `127.0.0.1` only — nothing is exposed to your network.
+- Essay text from the model is always rendered as text, never HTML.
+- Tailwind and Chart.js load from CDNs; `styles.css` carries the design tokens
+  and component styles, so the page stays presentable if a CDN is blocked.
+- Honours `prefers-reduced-motion`: the pacer glow and caret stop animating.
+- All text colours were checked against WCAG AA on the cream background.

@@ -38,6 +38,10 @@
       request(`/api/stats${Number.isFinite(Number(limit)) ? `?limit=${Math.round(Number(limit))}` : ''}`),
     clearStats: () => request('/api/stats', { method: 'DELETE' }),
     saveSession: (session) => request('/api/stats', { method: 'POST', body: session }),
+    getFavourites: () => request('/api/favourites'),
+    saveFavourite: (favourite) => request('/api/favourites', { method: 'POST', body: favourite }),
+    deleteFavourite: (id) =>
+      request(`/api/favourites/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     generateText: (topic, options) => {
       const opts = options || {};
       const body = { topic: topic || undefined };

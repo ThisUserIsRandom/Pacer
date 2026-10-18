@@ -1,4 +1,6 @@
-/* Pacer — Tab 2: Touch Typing with live colour coding and a virtual keyboard. */
+/* Pacer — Tab 2: Touch Typing.
+   Sources: common words · sentences · AI essay · a saved passage.
+   Options: drill length, capitals/punctuation/numbers, timed or finish-the-text. */
 (function () {
   'use strict';
 
@@ -42,15 +44,42 @@
   const KEY_LABELS = { shift: '⇧ shift', ' ': 'space', backspace: '⌫' };
   const KEY_CLASSES = { shift: 'key--wide', ' ': 'key--space', backspace: 'key--wide' };
 
-  const AI_WORD_BUDGET = 38;
+  const MIN_DRILL = 10;
+  const MAX_DRILL = 60;
+  const DEFAULT_DRILL = 28;
+  const MIN_ESSAY = 50;
+  const MAX_ESSAY = 1200;
+  const DEFAULT_ESSAY = 300;
+  /** Words built per second of a timed drill (≈130 wpm of headroom). */
+  const TIMED_WORDS_PER_SEC = 2.2;
+  const PREFS_KEY = 'pacer.typing';
+
+  const SOURCE_LABELS = {
+    words: 'common words',
+    sentences: 'sentences',
+    ai: 'AI essay',
+    favourite: 'saved passage'
+  };
+
+  const PUNCTUATION = ['.', '.', '.', ',', ',', '!', '?', ';'];
+  const STRIP_PUNCTUATION = /[.,!?;:"“”'’()\[\]{}<>/\\|~`^*_+=&%$#@-]/g;
 
   const el = {};
   const state = {
-    mode: 'words',
+    source: 'words',
+    drillWords: DEFAULT_DRILL,
+    options: { capitals: true, punctuation: true, numbers: false },
+    timed: false,
+    durationSec: 0,
+    aiWords: DEFAULT_ESSAY,
+    aiText: '',
+    favouriteText: '',
+    favouriteTopic: '',
     text: '',
     target: [],
     spans: [],
     typed: '',
+    drillWordCount: 0,
     totalKeystrokes: 0,
     correctKeystrokes: 0,
     startedAt: null,
@@ -59,29 +88,54 @@
     logged: false,
     caret: null,
     keyNodes: new Map(),
-    aiBusy: false
+    generating: false,
+    controller: null
   };
 
   function cacheElements() {
     el.viewport = document.getElementById('typing-viewport');
     el.text = document.getElementById('typing-text');
     el.keyboard = document.getElementById('keyboard');
+    el.status = document.getElementById('typing-status');
     el.wpm = document.getElementById('typing-wpm');
     el.accuracy = document.getElementById('typing-accuracy');
     el.errors = document.getElementById('typing-errors');
     el.time = document.getElementById('typing-time');
+    el.timeLabel = document.getElementById('typing-time-label');
     el.progress = document.getElementById('typing-progress');
     el.result = document.getElementById('typing-result');
     el.restart = document.getElementById('typing-restart');
     el.newText = document.getElementById('typing-new');
     el.save = document.getElementById('typing-save');
-    el.modeButtons = Array.from(document.querySelectorAll('[data-typing-mode]'));
     el.help = document.getElementById('typing-help');
+    el.sourceButtons = Array.from(document.querySelectorAll('[data-typing-mode]'));
+    el.timerButtons = Array.from(document.querySelectorAll('[data-typing-timer]'));
+    el.aiPanel = document.getElementById('typing-ai-panel');
+    el.topic = document.getElementById('typing-topic');
+    el.generate = document.getElementById('typing-generate');
+    el.generateLabel = document.getElementById('typing-generate-label');
+    el.spinner = document.getElementById('typing-spinner');
+    el.generateStatus = document.getElementById('typing-generate-status');
+    el.lengthValue = document.getElementById('typing-length-value');
+    el.lengthRange = document.getElementById('typing-length-range');
+    el.lengthUp = document.getElementById('typing-length-up');
+    el.lengthDown = document.getElementById('typing-length-down');
+    el.drillValue = document.getElementById('typing-drill-value');
+    el.drillRange = document.getElementById('typing-drill-range');
+    el.drillNote = document.getElementById('typing-drill-note');
+    el.optCapitals = document.getElementById('typing-opt-capitals');
+    el.optPunctuation = document.getElementById('typing-opt-punctuation');
+    el.optNumbers = document.getElementById('typing-opt-numbers');
+    el.favSelect = document.getElementById('typing-fav-select');
+    el.favLoad = document.getElementById('typing-fav-load');
+    el.favSave = document.getElementById('typing-fav-save');
+    el.favDelete = document.getElementById('typing-fav-delete');
+    el.favCount = document.getElementById('typing-fav-count');
   }
 
   /* -------------------------------------------------------------- metrics */
 
-  /** Live metrics, computed exactly as specified in the plan. */
+  /** Live metrics. */
   function metrics() {
     let correctChars = 0;
     const compareLength = Math.min(state.typed.length, state.target.length);
@@ -102,20 +156,51 @@
     return { correctChars, errors, elapsedMs, netWpm, grossWpm, accuracy };
   }
 
+  /** Words actually typed so far (state.target holds characters, not words). */
+  function typedWordCount() {
+    const typed = state.typed.trim();
+    return typed ? typed.split(/\s+/).length : 0;
+  }
+
+  /** Time left in a timed drill, in seconds (null when untimed). */
+  function secondsLeft() {
+    if (!state.timed) return null;
+    if (!state.startedAt) return state.durationSec;
+    return state.durationSec - (Date.now() - state.startedAt) / 1000;
+  }
+
   function paintMetrics() {
     const m = metrics();
     el.wpm.textContent = String(Math.round(m.netWpm));
     el.accuracy.textContent = m.accuracy.toFixed(1);
     el.errors.textContent = String(m.errors);
-    el.time.textContent = formatTime(m.elapsedMs / 1000);
 
-    const ratio = state.target.length ? clamp(state.typed.length / state.target.length, 0, 1) : 0;
-    el.progress.style.width = `${(ratio * 100).toFixed(2)}%`;
+    const left = secondsLeft();
+    if (left === null) {
+      el.timeLabel.textContent = 'Time';
+      el.time.textContent = formatTime(m.elapsedMs / 1000);
+      const ratio = state.target.length
+        ? clamp(state.typed.length / state.target.length, 0, 1)
+        : 0;
+      el.progress.style.width = `${(ratio * 100).toFixed(2)}%`;
+    } else {
+      el.timeLabel.textContent = 'Time left';
+      el.time.textContent = formatTime(Math.max(0, left));
+      const ratio = state.durationSec
+        ? clamp(1 - Math.max(0, left) / state.durationSec, 0, 1)
+        : 0;
+      el.progress.style.width = `${(ratio * 100).toFixed(2)}%`;
+    }
   }
 
   function ensureTimer() {
     if (state.timerId) return;
-    state.timerId = window.setInterval(paintMetrics, 250);
+    state.timerId = window.setInterval(() => {
+      paintMetrics();
+      if (state.timed && !state.finished && state.startedAt && secondsLeft() <= 0) {
+        finish('time');
+      }
+    }, 200);
   }
 
   function stopTimer() {
@@ -123,6 +208,126 @@
       window.clearInterval(state.timerId);
       state.timerId = null;
     }
+  }
+
+  /* ----------------------------------------------------------- drill text */
+
+  function drillTarget() {
+    const timedNeed = state.timed ? Math.ceil(state.durationSec * TIMED_WORDS_PER_SEC) : 0;
+    return Math.max(state.drillWords, timedNeed);
+  }
+
+  function randomInt(max) {
+    return Math.floor(Math.random() * max);
+  }
+
+  /** Pick `count` words, reshuffling so drills do not repeat in a fixed order. */
+  function wordList(count) {
+    const picked = [];
+    for (let i = 0; i < count; i += 1) {
+      picked.push(WORDS[randomInt(WORDS.length)]);
+    }
+    return picked;
+  }
+
+  function sentenceList(count) {
+    const pool = SENTENCES.slice();
+    const picked = [];
+    let words = 0;
+    let guard = 0;
+    while (words < count && guard < count * 3) {
+      if (pool.length === 0) pool.push(...SENTENCES);
+      const sentence = pool.splice(randomInt(pool.length), 1)[0];
+      picked.push(sentence);
+      words += sentence.split(/\s+/).length;
+      guard += 1;
+    }
+    return picked;
+  }
+
+  /**
+   * Take whole sentences from `text` until at least `count` words are collected,
+   * starting at a random sentence so "new text" varies. Cycles when the source
+   * is shorter than the requested drill (long timed drills).
+   */
+  function excerptFrom(text, count, randomize) {
+    const sentences = String(text)
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+
+    if (sentences.length === 0) return String(text).trim();
+
+    const parts = [];
+    let words = 0;
+    let index = randomize ? randomInt(sentences.length) : 0;
+    let guard = 0;
+
+    while (words < count && guard < sentences.length * 4) {
+      const sentence = sentences[index % sentences.length];
+      parts.push(sentence);
+      words += sentence.split(/\s+/).length;
+      index += 1;
+      guard += 1;
+    }
+
+    return parts.join(' ');
+  }
+
+  /** Apply the capitals / punctuation / numbers options to a drill. */
+  function applyDifficulty(text, isWordDrill) {
+    let out = String(text);
+
+    if (isWordDrill) {
+      let tokens = out.split(/\s+/).filter(Boolean);
+
+      if (state.options.numbers) {
+        tokens = tokens.map((token) =>
+          Math.random() < 0.15 ? String(randomInt(9000) + 100) : token
+        );
+      }
+      if (state.options.capitals) {
+        tokens = tokens.map((token, index) =>
+          index === 0 || Math.random() < 0.22
+            ? token.charAt(0).toUpperCase() + token.slice(1)
+            : token
+        );
+      }
+      if (state.options.punctuation) {
+        tokens = tokens.map((token, index) =>
+          index === tokens.length - 1 || Math.random() < 0.18
+            ? token + PUNCTUATION[randomInt(PUNCTUATION.length)]
+            : token
+        );
+      }
+      return tokens.join(' ');
+    }
+
+    // Prose sources already carry capitals and punctuation; the toggles remove them.
+    if (!state.options.punctuation) {
+      out = out.replace(STRIP_PUNCTUATION, '').replace(/\s{2,}/g, ' ');
+    }
+    if (!state.options.capitals) out = out.toLowerCase();
+    return out.trim();
+  }
+
+  /** Build the drill text for the current source, or null when none is loaded. */
+  function buildDrillText(randomize) {
+    const need = drillTarget();
+    const isWordDrill = state.source === 'words';
+
+    if (isWordDrill) {
+      return applyDifficulty(wordList(need).join(' '), true);
+    }
+
+    if (state.source === 'sentences') {
+      return applyDifficulty(sentenceList(need).join(' '), false);
+    }
+
+    const raw = state.source === 'ai' ? state.aiText : state.favouriteText;
+    if (!raw) return null;
+
+    return applyDifficulty(excerptFrom(raw, need, randomize), false);
   }
 
   /* ------------------------------------------------------------- painting */
@@ -140,7 +345,6 @@
     span.className = `char ${correct ? 'char--correct' : 'char--wrong'}`;
   }
 
-  /** Repaint the characters that a single keystroke could have touched. */
   function paintAround(index) {
     paintChar(index - 1);
     paintChar(index);
@@ -157,18 +361,59 @@
     }
   }
 
-  function buildText(text) {
-    state.text = text;
-    state.target = Array.from(text);
-    state.spans = [];
+  function updateStatus() {
+    if (!el.status) return;
+    const mode = state.timed ? `${state.durationSec}s timed` : 'untimed';
+    const source = SOURCE_LABELS[state.source] || state.source;
+    el.status.textContent = state.drillWordCount
+      ? `${state.drillWordCount} words · ${mode} · ${source}`
+      : `${mode} · ${source}`;
+  }
+
+  function updateDrillNote() {
+    if (!el.drillNote) return;
+    el.drillNote.textContent = state.timed
+      ? `Timed drill: at least ${drillTarget()} words are built so you do not run out.`
+      : 'Word and sentence drills use exactly this many words.';
+  }
+
+  function resetRunState() {
     state.typed = '';
     state.totalKeystrokes = 0;
     state.correctKeystrokes = 0;
     state.startedAt = null;
     state.finished = false;
     state.logged = false;
-
     stopTimer();
+  }
+
+  /** Generic message in place of a drill (nothing loaded yet). */
+  function showPlaceholder(message) {
+    resetRunState();
+    state.text = '';
+    state.target = [];
+    state.spans = [];
+    state.drillWordCount = 0;
+
+    el.text.textContent = '';
+    const note = document.createElement('div');
+    note.className = 'typing-placeholder';
+    note.textContent = message;
+    el.text.appendChild(note);
+
+    el.result.hidden = true;
+    el.result.textContent = '';
+    highlightNextKey();
+    updateStatus();
+    paintMetrics();
+  }
+
+  function buildText(text) {
+    state.text = text;
+    state.target = Array.from(text);
+    state.spans = [];
+    state.drillWordCount = (text.match(/\S+/g) || []).length;
+    resetRunState();
 
     state.caret = document.createElement('span');
     state.caret.className = 'typing-caret';
@@ -184,14 +429,32 @@
     });
 
     el.text.appendChild(fragment);
-    state.spans[0] && (state.spans[0].className = 'char char--current');
+    if (state.spans[0]) state.spans[0].className = 'char char--current';
     moveCaret();
 
     el.result.hidden = true;
     el.result.textContent = '';
     highlightNextKey();
+    updateStatus();
     paintMetrics();
     if (el.viewport) el.viewport.scrollTop = 0;
+  }
+
+  /** Rebuild the drill from the current source and options. */
+  function rebuild(randomize) {
+    const text = buildDrillText(randomize);
+
+    if (!text) {
+      if (state.source === 'ai') {
+        showPlaceholder('Type a topic and press Generate for typing ✨');
+      } else {
+        showPlaceholder('Pick a saved passage and press Practise ❤');
+      }
+      return false;
+    }
+
+    buildText(text);
+    return true;
   }
 
   /* ------------------------------------------------------------ keyboard */
@@ -229,12 +492,6 @@
     if (/[a-z]/.test(lower)) return lower;
     if (HOME_KEYS.has(character)) return character;
     return null;
-  }
-
-  function clearKeyStates() {
-    state.keyNodes.forEach((node) => {
-      node.classList.remove('key--next', 'key--active', 'key--error');
-    });
   }
 
   function highlightNextKey() {
@@ -287,7 +544,7 @@
       return;
     }
 
-    // Ignore navigation and modifier keys, but let Shift show on the keyboard.
+    // Let Shift show on the keyboard, then ignore non-printable keys.
     if (event.key === 'Shift') {
       flashKey('shift', 'key--active');
       return;
@@ -296,10 +553,10 @@
 
     event.preventDefault();
     if (state.finished) return;
+    if (state.target.length === 0) return;
     if (state.typed.length >= state.target.length) return;
 
     if (id) {
-      // Wrong physical key for the expected character.
       const expected = keyIdFor(state.target[state.typed.length]);
       flashKey(id, expected && id !== expected ? 'key--error' : 'key--active');
     }
@@ -320,25 +577,27 @@
     highlightNextKey();
     paintMetrics();
 
-    if (state.typed.length >= state.target.length) finish();
+    if (state.typed.length >= state.target.length) finish('complete');
   }
 
   /* ------------------------------------------------------------- results */
 
-  function finish() {
+  function finish(reason) {
     if (state.finished) return;
     state.finished = true;
     stopTimer();
     paintMetrics();
 
     const m = metrics();
+    const timedOut = reason === 'time';
+
     el.result.hidden = false;
     el.result.textContent = '';
 
     const heading = document.createElement('h3');
     heading.className = 'title';
     heading.style.fontSize = '1.15rem';
-    heading.textContent = 'Run complete! 🎉';
+    heading.textContent = timedOut ? "Time's up! ⏱" : 'Run complete! 🎉';
     el.result.appendChild(heading);
 
     const row = document.createElement('div');
@@ -391,7 +650,7 @@
         accuracy: Math.round(m.accuracy * 10) / 10,
         errors: m.errors,
         durationSec: Math.round((m.elapsedMs / 1000) * 10) / 10,
-        wordCount: state.target.length
+        wordCount: typedWordCount()
       });
       Pacer.ui.toast(auto ? 'Typing run saved ✨' : 'Typing run saved to history ✨', 'ok');
       if (Pacer.analytics) Pacer.analytics.invalidate();
@@ -401,98 +660,239 @@
     }
   }
 
-  /* ---------------------------------------------------------- text sources */
+  /* ---------------------------------------------------------- AI passages */
 
-  function wordsText() {
-    const picked = [];
-    for (let i = 0; i < 28; i += 1) {
-      picked.push(WORDS[Math.floor(Math.random() * WORDS.length)]);
+  function setGenerating(active) {
+    state.generating = active;
+    el.generate.disabled = active;
+    el.spinner.hidden = !active;
+    el.generateLabel.textContent = active ? 'Writing…' : '✨ Generate for typing';
+  }
+
+  function setEssayLength(next) {
+    const rounded = Math.round(Number(next) / 10) * 10;
+    state.aiWords = clamp(Number.isFinite(rounded) ? rounded : DEFAULT_ESSAY, MIN_ESSAY, MAX_ESSAY);
+    el.lengthValue.textContent = String(state.aiWords);
+    el.lengthRange.value = String(state.aiWords);
+    savePrefs();
+  }
+
+  async function generateForTyping() {
+    if (state.generating) return;
+
+    const topic = el.topic.value.trim();
+    setGenerating(true);
+
+    const startedAt = Date.now();
+    const ticker = window.setInterval(() => {
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(0);
+      el.generateStatus.textContent = `Asking your local model for ${state.aiWords} words… ${seconds}s`;
+    }, 500);
+    el.generateStatus.textContent = `Asking your local model for ${state.aiWords} words… 0s`;
+
+    const controller = new AbortController();
+    state.controller = controller;
+
+    try {
+      const result = await Pacer.api.generateText(topic, {
+        signal: controller.signal,
+        words: state.aiWords
+      });
+
+      state.aiText = result.text;
+      state.source = 'ai';
+      updateSourceButtons();
+      rebuild(false);
+
+      el.generateStatus.textContent =
+        result.source === 'llama'
+          ? `${result.wordCount} words · ${(result.durationMs / 1000).toFixed(1)}s · ready to type`
+          : `Built-in passage (${result.fallbackReason}). Ready to type.`;
+    } catch (error) {
+      el.generateStatus.textContent =
+        error.name === 'AbortError' ? 'Generation cancelled.' : `Generation failed: ${error.message}`;
+      if (error.name !== 'AbortError') {
+        Pacer.ui.toast(`Generation failed: ${error.message}`, 'error');
+      }
+    } finally {
+      window.clearInterval(ticker);
+      setGenerating(false);
+      state.controller = null;
     }
-    return picked.join(' ');
   }
 
-  function sentenceText() {
-    const shuffled = SENTENCES.slice().sort(() => Math.random() - 0.5);
-    return `${shuffled[0]} ${shuffled[1]}`;
+  /* ------------------------------------------------------------ favourites */
+
+  function mountFavourites() {
+    if (!Pacer.favourites) return;
+
+    state.favourites = Pacer.favourites.mount({
+      select: el.favSelect,
+      load: el.favLoad,
+      remove: el.favDelete,
+      save: el.favSave,
+      count: el.favCount,
+      getCurrent: () => ({
+        text: state.source === 'favourite' ? state.favouriteText : state.text,
+        topic: state.source === 'favourite' ? state.favouriteTopic : SOURCE_LABELS[state.source],
+        source: SOURCE_LABELS[state.source]
+      }),
+      onLoad: (favourite) => {
+        state.source = 'favourite';
+        state.favouriteText = favourite.text;
+        state.favouriteTopic = favourite.topic || '';
+        updateSourceButtons();
+        rebuild(false);
+        Pacer.ui.toast(
+          favourite.topic ? `Practising “${favourite.topic}”` : 'Practising your saved passage',
+          'ok'
+        );
+      }
+    });
+
+    state.favourites.refresh();
   }
 
-  /** First few complete sentences of an essay, capped to a sane length. */
-  function excerpt(text) {
-    const sentences = String(text).match(/[^.!?]+[.!?]+/g) || [String(text)];
-    let out = '';
-    for (const sentence of sentences) {
-      if ((out + sentence).split(/\s+/).length > AI_WORD_BUDGET && out) break;
-      out += sentence;
+  /* --------------------------------------------------------------- source */
+
+  function updateSourceButtons() {
+    el.sourceButtons.forEach((button) => {
+      const active = button.dataset.typingMode === state.source;
+      button.setAttribute('aria-pressed', String(active));
+      button.classList.toggle('btn--lav', active);
+    });
+    if (el.aiPanel) el.aiPanel.hidden = state.source !== 'ai';
+  }
+
+  function setSource(source, randomize) {
+    state.source = source;
+    updateSourceButtons();
+
+    if (source === 'ai' && !state.aiText) {
+      showPlaceholder('Type a topic and press Generate for typing ✨');
+      updateStatus();
+      return;
     }
-    return out.trim() || String(text).trim();
-  }
-
-  async function loadAiText() {
-    if (state.aiBusy) return;
-
-    // Reuse whatever the reading tab already generated — no second 40s wait.
-    const existing = Pacer.reader && Pacer.reader.getGeneratedText
-      ? Pacer.reader.getGeneratedText()
-      : '';
-
-    if (existing) {
-      buildText(excerpt(existing));
-      el.help.textContent = 'Practising on the essay from the Speed Reading tab. Type away!';
+    if (source === 'favourite' && !state.favouriteText) {
+      showPlaceholder('Pick a saved passage and press Practise ❤');
+      updateStatus();
       return;
     }
 
-    state.aiBusy = true;
-    el.help.textContent = 'Asking your local model for an essay… this can take 30–60s.';
-    try {
-      const topic = (Pacer.reader && Pacer.reader.getTopic && Pacer.reader.getTopic()) || '';
-      const result = await Pacer.api.generateText(topic);
-      buildText(excerpt(result.text));
-      el.help.textContent =
-        result.source === 'llama'
-          ? `Practising on a fresh ${result.wordCount}-word essay from ${result.model}.`
-          : `Practising on a built-in essay (${result.fallbackReason}).`;
-    } catch (error) {
-      buildText(sentenceText());
-      el.help.textContent = `Could not reach the generator (${error.message}) — using a built-in sentence.`;
-    } finally {
-      state.aiBusy = false;
-    }
+    rebuild(randomize === true);
+    savePrefs();
   }
 
-  function setMode(mode) {
-    state.mode = mode;
-    el.modeButtons.forEach((button) => {
-      button.setAttribute('aria-pressed', String(button.dataset.typingMode === mode));
-      button.classList.toggle('btn--lav', button.dataset.typingMode === mode);
+  function setTimed(durationSec) {
+    state.timed = durationSec > 0;
+    state.durationSec = durationSec;
+    el.timerButtons.forEach((button) => {
+      const active = Number(button.dataset.typingTimer) === durationSec;
+      button.setAttribute('aria-pressed', String(active));
+      button.classList.toggle('btn--lav', active);
     });
+    updateDrillNote();
+    rebuild(false);
+    savePrefs();
+  }
 
-    if (mode === 'words') {
-      buildText(wordsText());
-      el.help.textContent = 'Just start typing — the timer begins on your first keystroke. Backspace corrects, but the mistake stays in your accuracy score.';
-    } else if (mode === 'sentences') {
-      buildText(sentenceText());
-      el.help.textContent = 'Full sentences, capital letters and punctuation included. Shift is your friend.';
-    } else {
-      loadAiText();
+  function setDrillWords(next) {
+    state.drillWords = clamp(Math.round(Number(next)), MIN_DRILL, MAX_DRILL);
+    el.drillValue.textContent = String(state.drillWords);
+    el.drillRange.value = String(state.drillWords);
+    updateDrillNote();
+    rebuild(false);
+    savePrefs();
+  }
+
+  /* ------------------------------------------------------------ prefs */
+
+  function savePrefs() {
+    try {
+      window.localStorage.setItem(
+        PREFS_KEY,
+        JSON.stringify({
+          source: state.source,
+          drillWords: state.drillWords,
+          options: state.options,
+          timed: state.timed,
+          durationSec: state.durationSec,
+          aiWords: state.aiWords
+        })
+      );
+    } catch {
+      /* storage unavailable; options simply are not remembered */
     }
   }
 
-  function nextText() {
-    setMode(state.mode);
+  function loadPrefs() {
+    let prefs = null;
+    try {
+      prefs = JSON.parse(window.localStorage.getItem(PREFS_KEY) || 'null');
+    } catch {
+      prefs = null;
+    }
+    if (!prefs || typeof prefs !== 'object') return;
+
+    if (Number.isFinite(prefs.drillWords)) state.drillWords = clamp(prefs.drillWords, MIN_DRILL, MAX_DRILL);
+    if (Number.isFinite(prefs.aiWords)) state.aiWords = clamp(prefs.aiWords, MIN_ESSAY, MAX_ESSAY);
+    if (prefs.options && typeof prefs.options === 'object') {
+      state.options = {
+        capitals: prefs.options.capitals !== false,
+        punctuation: prefs.options.punctuation !== false,
+        numbers: prefs.options.numbers === true
+      };
+    }
+    if (Number.isFinite(prefs.durationSec)) state.durationSec = prefs.durationSec;
+    state.timed = typeof prefs.timed === 'boolean' ? prefs.timed : state.durationSec > 0;
+    if (['words', 'sentences', 'ai', 'favourite'].includes(prefs.source)) state.source = prefs.source;
   }
 
   /* --------------------------------------------------------------- setup */
 
   function bindControls() {
-    el.modeButtons.forEach((button) => {
-      button.addEventListener('click', () => setMode(button.dataset.typingMode));
+    el.sourceButtons.forEach((button) => {
+      button.addEventListener('click', () => setSource(button.dataset.typingMode, false));
     });
 
-    el.restart.addEventListener('click', () => buildText(state.text));
-    el.newText.addEventListener('click', nextText);
+    el.timerButtons.forEach((button) => {
+      button.addEventListener('click', () => setTimed(Number(button.dataset.typingTimer)));
+    });
+
+    el.drillRange.addEventListener('input', () => setDrillWords(Number(el.drillRange.value)));
+
+    el.optCapitals.addEventListener('change', () => {
+      state.options.capitals = el.optCapitals.checked;
+      rebuild(false);
+      savePrefs();
+    });
+    el.optPunctuation.addEventListener('change', () => {
+      state.options.punctuation = el.optPunctuation.checked;
+      rebuild(false);
+      savePrefs();
+    });
+    el.optNumbers.addEventListener('change', () => {
+      state.options.numbers = el.optNumbers.checked;
+      rebuild(false);
+      savePrefs();
+    });
+
+    el.lengthUp.addEventListener('click', () => setEssayLength(state.aiWords + 50));
+    el.lengthDown.addEventListener('click', () => setEssayLength(state.aiWords - 50));
+    el.lengthRange.addEventListener('input', () => setEssayLength(Number(el.lengthRange.value)));
+    el.generate.addEventListener('click', generateForTyping);
+    el.topic.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        generateForTyping();
+      }
+    });
+
+    // Restart replays the same drill; New text reshuffles it.
+    el.restart.addEventListener('click', () => rebuild(false));
+    el.newText.addEventListener('click', () => rebuild(true));
     el.save.addEventListener('click', () => logSession(false));
 
-    // Clicking anywhere in the practice area focuses it.
     el.viewport.addEventListener('click', () => el.viewport.focus());
 
     document.addEventListener('keydown', handleKeydown);
@@ -501,9 +901,39 @@
   function init() {
     cacheElements();
     buildKeyboard();
+    loadPrefs();
+
+    // Reflect restored preferences in the controls.
+    el.optCapitals.checked = state.options.capitals;
+    el.optPunctuation.checked = state.options.punctuation;
+    el.optNumbers.checked = state.options.numbers;
+    setEssayLength(state.aiWords);
+    el.drillValue.textContent = String(state.drillWords);
+    el.drillRange.value = String(state.drillWords);
+    el.timerButtons.forEach((button) => {
+      const active = Number(button.dataset.typingTimer) === (state.timed ? state.durationSec : 0);
+      button.setAttribute('aria-pressed', String(active));
+      button.classList.toggle('btn--lav', active);
+    });
+    updateDrillNote();
+
     bindControls();
-    setMode('words');
+    mountFavourites();
+    setSource(state.source, false);
   }
 
-  Pacer.typing = { init, setMode, state, metrics };
+  Pacer.typing = {
+    init,
+    setSource,
+    state,
+    metrics,
+    /** Load a saved passage straight into a drill (used by the reading tab). */
+    practise: (favourite) => {
+      state.source = 'favourite';
+      state.favouriteText = favourite.text;
+      state.favouriteTopic = favourite.topic || '';
+      updateSourceButtons();
+      rebuild(false);
+    }
+  };
 })();

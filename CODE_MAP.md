@@ -76,6 +76,9 @@ Env parsing + Express wiring only; no business logic.
 | `POST /api/stats` | validates + appends → `201 {session, count}`; `400 {error}` |
 | `DELETE /api/stats` | wipes history → `{sessions:[], count:0, total:0, backend, aggregates}` |
 | `/api/*` fallthrough | `404 {error}` via `app.use('/api', ...)` — **never** `app.get('*')` (Express 5 rejects bare `*`) |
+| `GET /api/favourites` | `{favourites, count, backend}` — saved passages, newest first |
+| `POST /api/favourites` | `{text, topic?, source?}` → `201 {favourite, duplicate:false}`, or `200 {favourite, duplicate:true}` when the identical text already exists |
+| `DELETE /api/favourites/:id` | `{deleted:true}`, or `404` when the id is unknown |
 | error handler | 4-arg middleware, JSON `{error}`, honours `error.statusCode` |
 
 **`POST /api/generate` flow:** validate topic → `AbortController` wired to
@@ -162,9 +165,10 @@ validates every file and there is no build step. Each file is an IIFE.
 
 | File | Lines | Responsibility | Registers |
 | --- | --- | --- | --- |
-| `js/api.js` | 84 | fetch wrapper (non-2xx → throw), toasts, `formatTime`, `clamp` | `Pacer.api`, `Pacer.ui` |
-| `js/reader.js` | 547 | tab 1: pacer engine, WPM, length, generation | `Pacer.reader` |
-| `js/typing.js` | 509 | tab 2: typing model, metrics, virtual keyboard | `Pacer.typing` |
+| `js/api.js` | ~90 | fetch wrapper (non-2xx → throw), toasts, `formatTime`, `clamp` | `Pacer.api`, `Pacer.ui` |
+| `js/favourites.js` | ~150 | shared "my paragraphs" widget: save / load / delete, cross-tab sync | `Pacer.favourites` |
+| `js/reader.js` | ~590 | tab 1: pacer engine, WPM, length, generation, favourites | `Pacer.reader` |
+| `js/typing.js` | ~700 | tab 2: sources, drill options, typing model, metrics, keyboard | `Pacer.typing` |
 | `js/analytics.js` | 302 | tab 3: Chart.js graphs, stat cards | `Pacer.analytics` |
 | `js/main.js` | 138 | tab routing + hash, health badge, boot | `Pacer.main` |
 
@@ -174,7 +178,22 @@ validates every file and there is no build step. Each file is an IIFE.
 > dead. `analytics.js` only touches `Pacer.ui` inside functions, so it is less
 > sensitive, but keep `api.js` first. `main.js` must be last because it defines
 > `Pacer.main`, which the other modules only read **inside event handlers**
-> (never at load time).
+> (never at load time). `favourites.js` sits between `api.js` and `reader.js`.
+
+### Favourites widget (shared by both tabs)
+
+`Pacer.favourites.mount({select, load, remove, save, count, getCurrent, onLoad})`
+returns `{refresh, save, items}`. One instance per tab.
+
+> **Cross-tab sync is mandatory.** All instances are held in a module-level
+> `instances` array, and every save/delete calls `broadcast()`, which refreshes
+> **every** widget. Refreshing only the widget that made the change leaves the
+> other tab's list stale until a reload — that bug was caught by the browser
+> suite. Any new mutation must go through `broadcast()`.
+
+`getCurrent()` must return `{text, topic, source}` for the passage currently in
+view; each tab supplies its own (reader uses `state.rawText`, typing uses the
+drill or the loaded favourite).
 
 ### Cross-module contract
 
@@ -201,15 +220,55 @@ Each module owns its own DOM ids (see the `getElementById` calls in
 `#analytics`). `tabFromHash()` on boot restores a deep link; `hashchange` is
 honoured, so tabs are bookmarkable and screenshot-able.
 
-### Reading pacer engine (`reader.js`)
+### Typing tab (`typing.js`)
+
+**Sources**: `words` (from a 300-word frequency list) · `sentences` (7 pangram-ish
+sentences, cycled) · `ai` (own topic + `state.aiText`) · `favourite`
+(`state.favouriteText`). `buildDrillText(randomize)` dispatches on `state.source`
+and returns `null` when the source has no text yet, in which case
+`showPlaceholder()` renders a prompt instead of a drill.
+
+**Drill length**: `drillTarget()` = `max(state.drillWords, timed ? durationSec × 2.2 : 0)`.
+Timed drills deliberately over-build so the text never runs out mid-run.
+
+**Difficulty** (`applyDifficulty(text, isWordDrill)`):
+- word drills *add* capitals/punctuation/numbers when enabled,
+- prose drills *keep* them, and strip/lowercase when the toggle is off.
+- `STRIP_PUNCTUATION` also removes apostrophes, so "don't" becomes "dont" — fine
+  for a drill, but do not reuse that helper for display text.
+
+**Timed mode**: `state.timed` + `state.durationSec` (0 = finish-the-text). The
+200ms interval calls `finish('time')` when `secondsLeft() <= 0`; the Time metric
+switches to a countdown and the progress bar tracks time instead of characters.
+
+**Options are persisted** as one JSON blob under `localStorage['pacer.typing']`
+(`savePrefs`/`loadPrefs`) — source, drillWords, difficulty, timed, durationSec,
+aiWords. Generated text is deliberately *not* persisted.
+
+**Empty states**: `showPlaceholder()` sets empty `target`, so `handleKeydown`
+returns early (`state.target.length === 0`) and typing is inert until a passage
+is loaded. Keep that guard — without it a keystroke would immediately "finish" a
+zero-length run.
+
+### Reading tab (`reader.js`)
 
 State: `words[]`, `spans[]`, `wordsRead` (float), `elapsedMs`, `wpm`,
-`targetWords`, `pacerY`, `lastIndex`.
+`targetWords`, `pacerY`, `lastIndex`, `rawText`, `sourceKind`.
 
 - `frame()` (rAF) **integrates** `wordsRead += dt * wpm/60` rather than deriving
   it from wall-clock, so changing WPM mid-read doesn't teleport the pacer.
-- Pacer Y target = current word span's `offsetTop + height/2`, then **lerped**
-  (`pacerY += (target - pacerY) * 0.18`) for the smooth glide.
+- `pacerTargetY()` returns the **top edge** of the rule and measures the word's
+  **inline text box** (`Range.getBoundingClientRect()`, scroll-invariant after
+  subtracting the track rect) so the rule lands in the leading gap *below* the
+  glyphs — `PACER_GAP` (4px) under them. It is **cached per word index**
+  (`state.pacerCacheIndex/Y`) because the rect reads force a layout and are only
+  invalidated on new text, reset, and window resize.
+  Do **not** go back to `offsetTop + offsetHeight/2`: that strikes through the
+  letters (measured 6px overlap on a 5–6px bar). `.pacer` therefore has no
+  negative `margin-top`, and `.reader-text` carries `position:relative; z-index:1`
+  so the glow can never paint over the text. The former blurred `::after` band
+  was removed for the same reason.
+- Then **lerped**: `pacerY += (target - pacerY) * 0.18` for the smooth glide.
 - `paintIndex()` is O(delta): marks passed words `.rw--done`, one `.rw--current`.
 - `keepInView()` only scrolls when the word leaves the 20–72% band of the viewport.
 - Clicking a word seeks (pauses, sets `wordsRead`, repaints).
@@ -227,6 +286,14 @@ accuracy           correctKeystrokes/totalKeystrokes*100  (100 when no keystroke
 errors             totalKeystrokes - correctKeystrokes
 ```
 Timer starts on the first keystroke; 250ms interval refresh.
+
+Note `state.target` is an **array of characters**, not words. Use
+`typedWordCount()` when reporting a word count — storing `state.target.length`
+silently recorded characters as words (149 chars saved as "149 words").
+
+The server rejects `wpm > 2000`, so an automated or otherwise superhuman run
+fails to save (the toast shows the validation error and `state.logged` resets so
+a retry is possible). Only reachable with synthetic input.
 
 ### Analytics
 
@@ -266,11 +333,14 @@ tries SQLite, falls back to JSON, then runs a **one-time legacy import**.
 sessions(id TEXT PRIMARY KEY, type TEXT CHECK(type IN ('reading','typing')),
          created_at TEXT, wpm REAL, accuracy REAL, errors INTEGER,
          duration_sec REAL, word_count INTEGER, topic TEXT)
-meta(key TEXT PRIMARY KEY, value TEXT)          -- schema_version
-INDEX idx_sessions_created_at, idx_sessions_type
+favourites(id TEXT PRIMARY KEY, text TEXT, topic TEXT, source TEXT,
+           word_count INTEGER, created_at TEXT)
+meta(key TEXT PRIMARY KEY, value TEXT)          -- schema_version (currently 2)
+INDEX idx_sessions_created_at, idx_sessions_type,
+      idx_favourites_created_at, idx_favourites_text
 ```
-`PRAGMA journal_mode = WAL`, `synchronous = NORMAL`. `id` is a PK so the import
-is idempotent (`INSERT OR IGNORE`). Aggregates are computed in SQL
+`PRAGMA journal_mode = WAL`, `synchronous = NORMAL`. `id` is a PK so imports are
+idempotent (`INSERT OR IGNORE`). Aggregates are computed in SQL
 (`AVG`/`MAX`/`SUM`/`GROUP BY type`), never by loading rows into JS.
 
 ### JSON (`lib/stats-store.js`, fallback + shared validation)
@@ -294,6 +364,16 @@ old file becomes `stats.json.migrated-<ts>`. Empty legacy files are left alone.
 //         durationSec 0..86400, wordCount int>=0, topic<=200 chars
 ```
 `aggregates` = `{totalSessions, totalPracticeSec, reading:{count,avgWpm,bestWpm}, typing:{count,avgWpm,bestWpm,avgAccuracy,totalErrors}}`.
+
+Favourite shape (validated by `validateFavourite`, shared by both backends):
+
+```js
+{ id, text, topic:string|null, source:string|null, wordCount:int, createdAt:ISO }
+// text 1..20000 chars (newlines preserved), topic<=200, source<=40
+// identical `text` is deduplicated and returns the existing row
+```
+`DELETE /api/stats` clears **sessions only** — saved passages are user-curated and
+survive "Clear history" on purpose.
 
 ---
 
@@ -359,11 +439,15 @@ touching the real model: `trap` (thinking trap), `boom` (500), `hang` (timeout),
 `template` (kwarg rejected → retry), `tiny` (too short), `markdown` (sanitising).
 
 `.test-tmp/` (gitignored) holds the Playwright browser suites — `ui-check.js`
-(44 checks: hotkeys, pacer motion, typing metrics, length control, charts,
-430px layout), `gen-check.js` (21 checks against the mock), `style-audit.js`,
-`contrast.js` — plus `shots/`. They need `playwright-core` installed ad hoc
+(48 checks: hotkeys, pacer geometry, typing metrics, length control, charts,
+430px layout — it seeds and clears its own history), `typing-options.js`
+(36 checks: drill length, difficulty toggles, sources, timed mode, persistence,
+favourites across both tabs), `gen-check.js` (21 checks against the mock),
+`pacer-geom.js`, `complete-run.js`, `style-audit.js`, `contrast.js` — plus
+`shots/`. They need `playwright-core` installed ad hoc
 (`npm install playwright-core --no-save --cache ./.npm-cache`) and hardcode the
-Playwright Chromium path.
+Playwright Chromium path. Test scripts that exercise the AI source need the mock
+instance running (see below), so start it and point a second server at it.
 
 ---
 
@@ -373,7 +457,11 @@ Playwright Chromium path.
 | --- | --- |
 | New API endpoint | `app.js` (+ `scripts/smoke.sh`) |
 | Change session fields/bounds | `lib/stats-store.js` (`validateSession`) → both backends inherit; add a column in `lib/stats-db.js` `SCHEMA` (bump `SCHEMA_VERSION`) |
+| Change favourite fields/bounds | `lib/stats-store.js` (`validateFavourite`) → both backends inherit; mirror any column change in both `SCHEMA` and `rowToFavourite` |
 | New aggregation for the dashboard | `lib/stats-db.js` (SQL) **and** `lib/stats-store.js` (`computeAggregates`), then `analytics.js` |
+| New typing drill option | `public/index.html` (control) → `typing.js` (`state` + `loadPrefs`/`savePrefs` + `rebuild`) → `public/js/typing-options` test |
+| New typing source | `typing.js` (`buildDrillText`, `SOURCE_LABELS`, `setSource`) + a button in `#typing-sources` |
+| Favourites behaviour | `public/js/favourites.js` (widget + `broadcast`) — remember both tabs share it |
 | Prompt / model call tuning | `lib/llama.js` (`buildBody`, `generateEssay`) |
 | Offline essay content or length behaviour | `lib/fallback-essays.js` (`CANNED_ESSAYS`, `TOPIC_SENTENCE_GROUPS`, `normalizeLength`) |
 | Essay length bounds | `MIN_WORDS`/`MAX_WORDS` in `lib/fallback-essays.js` **and** the slider `min`/`max`/`step` in `public/index.html` **and** `MIN_WORDS`/`MAX_WORDS` in `public/js/reader.js` |

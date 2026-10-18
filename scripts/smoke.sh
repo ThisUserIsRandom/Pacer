@@ -250,6 +250,57 @@ else
   fi
 fi
 
+# -------------------------------------------------------------- favourites
+section 'favourites (saved passages)'
+
+status="$(request GET /api/favourites)"
+assert 'GET /api/favourites returns 200' '200' "$status"
+assert 'favourites response reports its backend' "$backend" "$(json 'parsed.backend')"
+
+fav_before="$(json 'parsed.count')"
+passage="The ocean keeps arriving, patient and unhurried, as if it has all the time in the world."
+
+status="$(request POST /api/favourites -H 'Content-Type: application/json' \
+  -d "{\"text\":\"$passage\",\"topic\":\"the ocean\",\"source\":\"test\"}")"
+assert 'saving a passage returns 201' '201' "$status"
+fav_id="$(json 'parsed.favourite.id')"
+assert 'saved passage reports a word count' '17' "$(json 'parsed.favourite.wordCount')"
+
+status="$(request POST /api/favourites -H 'Content-Type: application/json' \
+  -d "{\"text\":\"$passage\",\"topic\":\"the ocean\"}")"
+assert 'identical text is deduplicated (200)' '200' "$status"
+assert 'deduplicated passage keeps the same id' "$fav_id" "$(json 'parsed.favourite.id')"
+assert 'duplicate flag is set' 'true' "$(json 'parsed.duplicate')"
+
+status="$(request POST /api/favourites -H 'Content-Type: application/json' -d '{"text":"   "}')"
+assert 'blank passage is rejected' '400' "$status"
+
+status="$(request POST /api/favourites -H 'Content-Type: application/json' -d '{}')"
+assert 'missing text is rejected' '400' "$status"
+
+request GET /api/favourites >/dev/null
+assert 'saved passage appears in the list' "$((fav_before + 1))" "$(json 'parsed.count')"
+
+if [ "$backend" = 'sqlite' ]; then
+  stored_favs="$(node --disable-warning=ExperimentalWarning -e "
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(process.argv[1]);
+    console.log(db.prepare('SELECT COUNT(*) AS c FROM favourites').get().c);
+    db.close();
+  " "$store_file" 2>/dev/null)"
+  assert 'favourites are persisted in SQLite' "$((fav_before + 1))" "$stored_favs"
+fi
+
+status="$(request DELETE "/api/favourites/$fav_id")"
+assert 'deleting a saved passage returns 200' '200' "$status"
+assert 'delete is confirmed' 'true' "$(json 'parsed.deleted')"
+
+status="$(request DELETE '/api/favourites/does-not-exist')"
+assert 'deleting an unknown passage returns 404' '404' "$status"
+
+request GET /api/favourites >/dev/null
+assert 'list returns to its original size' "$fav_before" "$(json 'parsed.count')"
+
 # ------------------------------------------------------------------ cleanup
 section 'DELETE /api/stats'
 

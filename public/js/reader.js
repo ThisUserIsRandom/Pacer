@@ -12,6 +12,8 @@
   const MIN_WORDS = 50;
   const MAX_WORDS = 1200;
   const MIN_WORDS_TO_LOG = 20;
+  /** Gap between the bottom of the current line's glyphs and the pacer rule. */
+  const PACER_GAP = 4;
 
   /** Shown on first load so the pacer is usable without waiting on the model. */
   const SAMPLE_TEXT =
@@ -46,9 +48,13 @@
     lastTs: 0,
     rafId: null,
     pacerY: 0,
+    pacerCacheIndex: -1,
+    pacerCacheY: 0,
     lastIndex: -1,
     logged: false,
     topic: '',
+    rawText: '',
+    sourceKind: 'sample',
     generatedText: '',
     generating: false,
     controller: null
@@ -85,14 +91,25 @@
     el.paceNote = document.getElementById('reading-pace-note');
     el.paceTime = document.getElementById('reading-pace-time');
     el.sampleTopics = document.getElementById('sample-topics');
+    el.favSelect = document.getElementById('reading-fav-select');
+    el.favLoad = document.getElementById('reading-fav-load');
+    el.favSave = document.getElementById('reading-fav-save');
+    el.favDelete = document.getElementById('reading-fav-delete');
+    el.favCount = document.getElementById('reading-fav-count');
   }
 
   /* ------------------------------------------------------------- rendering */
+
+  /** Word positions change when the text re-wraps, so drop the cache. */
+  function invalidatePacerCache() {
+    state.pacerCacheIndex = -1;
+  }
 
   /** Split text into clickable word spans so the pacer can target them. */
   function renderText(text) {
     state.words = String(text).split(/\s+/).filter(Boolean);
     state.spans = [];
+    invalidatePacerCache();
     el.text.textContent = '';
 
     const fragment = document.createDocumentFragment();
@@ -158,11 +175,38 @@
     return clamp(Math.floor(state.wordsRead), 0, state.words.length - 1);
   }
 
-  /** Target Y for the pacer: the vertical middle of the current word. */
+  /**
+   * Y for the pacer, returning the TOP edge of the bar.
+   *
+   * Measured from the word's inline text box (not its line box) so the rule
+   * lands in the leading gap just below the letters instead of striking
+   * through them. Cached per word index: the rect reads force a layout, and
+   * the position only changes when the current word changes.
+   */
   function pacerTargetY(index) {
     const span = state.spans[index];
     if (!span) return 0;
-    return span.offsetTop + span.offsetHeight / 2;
+
+    if (index === state.pacerCacheIndex) return state.pacerCacheY;
+
+    let y = span.offsetTop + span.offsetHeight - PACER_GAP;
+
+    if (el.track && document.createRange) {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(span);
+        const glyph = range.getBoundingClientRect();
+        const track = el.track.getBoundingClientRect();
+        // Both rects are viewport-relative, so their difference is scroll-invariant.
+        if (glyph.height > 0) y = glyph.bottom - track.top + PACER_GAP;
+      } catch {
+        /* fall back to the line-box estimate above */
+      }
+    }
+
+    state.pacerCacheIndex = index;
+    state.pacerCacheY = y;
+    return y;
   }
 
   function keepInView(index) {
@@ -247,6 +291,7 @@
     state.lastTs = 0;
     state.logged = false;
     state.lastIndex = -1;
+    invalidatePacerCache();
     state.pacerY = pacerTargetY(0);
     el.pacer.style.transform = `translateY(${state.pacerY.toFixed(2)}px)`;
 
@@ -396,6 +441,7 @@
       el.source.textContent = badge.text;
 
       state.generatedText = result.text;
+      state.sourceKind = result.source;
       setText(result.text, result.topic || topic || 'generated text');
 
       if (result.source === 'llama') {
@@ -425,6 +471,7 @@
 
   function setText(text, topic) {
     state.topic = topic || '';
+    state.rawText = String(text || '');
     renderText(text);
     reset();
     setWpm(state.wpm);
@@ -483,6 +530,14 @@
       }
     });
 
+    // A resize re-wraps the text, so measured word positions are stale.
+    window.addEventListener('resize', () => {
+      invalidatePacerCache();
+      const index = currentIndex();
+      state.pacerY = pacerTargetY(index);
+      el.pacer.style.transform = `translateY(${state.pacerY.toFixed(2)}px)`;
+    });
+
     // Click a word to jump the pacer there.
     el.text.addEventListener('click', (event) => {
       const span = event.target.closest('.rw');
@@ -511,6 +566,37 @@
     });
   }
 
+  /** "My paragraphs" — save / reload passages you like. */
+  function mountFavourites() {
+    if (!Pacer.favourites) return;
+
+    state.favourites = Pacer.favourites.mount({
+      select: el.favSelect,
+      load: el.favLoad,
+      remove: el.favDelete,
+      save: el.favSave,
+      count: el.favCount,
+      getCurrent: () => ({
+        text: state.rawText,
+        topic: state.topic,
+        source: state.sourceKind
+      }),
+      onLoad: (favourite) => {
+        pause();
+        setText(favourite.text, favourite.topic || '');
+        state.generatedText = favourite.text;
+        state.sourceKind = 'saved';
+        el.source.className = 'badge badge--muted';
+        el.source.textContent = '❤ saved passage';
+        el.generateStatus.textContent = favourite.topic
+          ? `Loaded “${favourite.topic}” from your paragraphs.`
+          : 'Loaded a saved passage.';
+      }
+    });
+
+    state.favourites.refresh();
+  }
+
   function init() {
     cacheElements();
 
@@ -533,6 +619,7 @@
 
     bindControls();
     bindHotkeys();
+    mountFavourites();
   }
 
   Pacer.reader = {

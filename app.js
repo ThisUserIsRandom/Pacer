@@ -203,6 +203,47 @@ app.delete('/api/stats', async (req, res, next) => {
   }
 });
 
+/* ---------------------------------------------------------- favourites ---- */
+
+/** GET /api/favourites — every saved passage, newest first. */
+app.get('/api/favourites', async (req, res, next) => {
+  try {
+    const store = await storePromise;
+    const favourites = await store.listFavourites();
+    res.json({ favourites, count: favourites.length, backend: store.kind });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** POST /api/favourites — save the current passage. Identical text is deduped. */
+app.post('/api/favourites', async (req, res, next) => {
+  try {
+    const store = await storePromise;
+    const result = await store.addFavourite(req.body);
+    res.status(result.duplicate ? 200 : 201).json(result);
+  } catch (error) {
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  }
+});
+
+/** DELETE /api/favourites/:id — forget one saved passage. */
+app.delete('/api/favourites/:id', async (req, res, next) => {
+  try {
+    const store = await storePromise;
+    const result = await store.deleteFavourite(req.params.id);
+    if (!result.deleted) {
+      return res.status(404).json({ error: 'No saved passage with that id.' });
+    }
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use('/api', (req, res) => {
   res.status(404).json({ error: `Unknown endpoint: ${req.method} ${req.originalUrl}` });
 });

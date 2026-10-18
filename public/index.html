@@ -226,6 +226,29 @@
             <span class="label">Offline sample library</span>
             <div class="row" id="sample-topics"></div>
           </div>
+
+          <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+          <div class="row-between">
+            <span class="label">My paragraphs</span>
+            <span id="reading-fav-count" class="badge badge--muted">0 saved</span>
+          </div>
+          <select id="reading-fav-select" class="input" aria-label="Saved paragraphs"></select>
+          <div class="row">
+            <button id="reading-fav-load" class="btn btn--sm btn--mint">↧ Load</button>
+            <button id="reading-fav-save" class="btn btn--sm btn--lav">❤ Save current</button>
+            <button
+              id="reading-fav-delete"
+              class="btn btn--sm btn--danger"
+              aria-label="Delete the selected saved passage"
+            >
+              🗑
+            </button>
+          </div>
+          <p class="hint">
+            Save any passage you enjoy and come back to it later — the same list is
+            available in the typing tab.
+          </p>
         </aside>
       </section>
 
@@ -237,62 +260,177 @@
         class="stack"
         hidden
       >
-        <div class="card stack-sm">
-          <div class="row-between">
-            <h2 class="card-title"><span class="dot"></span>Typing practice</h2>
+        <div class="grid-2">
+          <div class="card stack-sm">
+            <div class="row-between">
+              <h2 class="card-title"><span class="dot"></span>Typing practice</h2>
+              <span id="typing-status" class="badge badge--muted">28 words · untimed</span>
+            </div>
+
+            <div
+              id="typing-viewport"
+              class="typing-viewport"
+              tabindex="0"
+              role="textbox"
+              aria-label="Typing practice area"
+              aria-describedby="typing-help"
+            >
+              <div id="typing-text" class="typing-text"></div>
+            </div>
+            <p id="typing-help" class="hint">
+              Just start typing — the timer begins on your first keystroke. Backspace
+              corrects, but the mistake stays in your accuracy score.
+            </p>
+
+            <div id="typing-result" class="result-card" hidden aria-live="polite"></div>
+
+            <div class="grid-3">
+              <div class="metric">
+                <span class="metric__label">Speed</span>
+                <span class="metric__value" id="typing-wpm">0</span><span class="metric__unit">wpm</span>
+              </div>
+              <div class="metric">
+                <span class="metric__label">Accuracy</span>
+                <span class="metric__value" id="typing-accuracy">100</span><span class="metric__unit">%</span>
+              </div>
+              <div class="metric">
+                <span class="metric__label">Errors</span>
+                <span class="metric__value" id="typing-errors">0</span>
+              </div>
+              <div class="metric">
+                <span class="metric__label" id="typing-time-label">Time</span>
+                <span class="metric__value" id="typing-time">0:00</span>
+              </div>
+            </div>
+
+            <div class="progress" aria-hidden="true">
+              <div id="typing-progress" class="progress__fill"></div>
+            </div>
+
             <div class="row">
+              <button id="typing-restart" class="btn btn--lav">↺ Restart</button>
+              <button id="typing-new" class="btn btn--mint">🎲 New text</button>
+              <div class="spacer"></div>
+              <button id="typing-save" class="btn">💾 Save result</button>
+            </div>
+          </div>
+
+          <aside class="card stack-sm">
+            <h2 class="card-title"><span class="dot"></span>Drill options</h2>
+
+            <span class="label">Source</span>
+            <div class="row" id="typing-sources">
               <button class="btn btn--sm" data-typing-mode="words" aria-pressed="true">Common words</button>
               <button class="btn btn--sm" data-typing-mode="sentences" aria-pressed="false">Sentences</button>
               <button class="btn btn--sm" data-typing-mode="ai" aria-pressed="false">✨ AI essay</button>
+              <button class="btn btn--sm" data-typing-mode="favourite" aria-pressed="false">❤ Saved</button>
             </div>
-          </div>
 
-          <div
-            id="typing-viewport"
-            class="typing-viewport"
-            tabindex="0"
-            role="textbox"
-            aria-label="Typing practice area"
-            aria-describedby="typing-help"
-          >
-            <div id="typing-text" class="typing-text"></div>
-          </div>
-          <p id="typing-help" class="hint">
-            Just start typing — the timer begins on your first keystroke. Backspace
-            corrects, but the mistake stays in your accuracy score.
-          </p>
+            <div id="typing-ai-panel" class="stack-sm" hidden>
+              <label class="label" for="typing-topic">Topic</label>
+              <input
+                id="typing-topic"
+                class="input"
+                type="text"
+                maxlength="200"
+                autocomplete="off"
+                placeholder="otters, kindness, the ocean…"
+              />
+              <button id="typing-generate" class="btn btn--lav">
+                <span class="spinner" id="typing-spinner" hidden></span>
+                <span id="typing-generate-label">✨ Generate for typing</span>
+              </button>
+              <p id="typing-generate-status" class="hint" aria-live="polite">
+                Writes a fresh passage for typing practice.
+              </p>
 
-          <div id="typing-result" class="result-card" hidden aria-live="polite"></div>
-
-          <div class="grid-3">
-            <div class="metric">
-              <span class="metric__label">Speed</span>
-              <span class="metric__value" id="typing-wpm">0</span><span class="metric__unit">wpm</span>
+              <span class="label">Essay length</span>
+              <div class="row">
+                <button id="typing-length-down" class="btn btn--sm" aria-label="Decrease essay length">− 50</button>
+                <div>
+                  <span class="big-number" id="typing-length-value">300</span>
+                  <span class="metric__unit">words</span>
+                </div>
+                <button id="typing-length-up" class="btn btn--sm" aria-label="Increase essay length">+ 50</button>
+              </div>
+              <input
+                id="typing-length-range"
+                type="range"
+                min="50"
+                max="1200"
+                step="50"
+                value="300"
+                class="w-full accent-mint"
+                aria-label="Essay length for typing practice"
+              />
             </div>
-            <div class="metric">
-              <span class="metric__label">Accuracy</span>
-              <span class="metric__value" id="typing-accuracy">100</span><span class="metric__unit">%</span>
-            </div>
-            <div class="metric">
-              <span class="metric__label">Errors</span>
-              <span class="metric__value" id="typing-errors">0</span>
-            </div>
-            <div class="metric">
-              <span class="metric__label">Time</span>
-              <span class="metric__value" id="typing-time">0:00</span>
-            </div>
-          </div>
 
-          <div class="progress" aria-hidden="true">
-            <div id="typing-progress" class="progress__fill"></div>
-          </div>
+            <hr class="w-full border-0 border-t border-lavender/50 my-1" />
 
-          <div class="row">
-            <button id="typing-restart" class="btn btn--lav">↺ Restart</button>
-            <button id="typing-new" class="btn btn--mint">🎲 New text</button>
-            <div class="spacer"></div>
-            <button id="typing-save" class="btn">💾 Save result</button>
-          </div>
+            <span class="label">
+              Drill length — <span id="typing-drill-value">28</span> words
+            </span>
+            <input
+              id="typing-drill-range"
+              type="range"
+              min="10"
+              max="60"
+              step="2"
+              value="28"
+              class="w-full accent-lavender"
+              aria-label="Words per drill"
+            />
+            <p class="hint" id="typing-drill-note">
+              Word and sentence drills use exactly this many words.
+            </p>
+
+            <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+            <span class="label">Include</span>
+            <div class="stack-sm">
+              <label class="check">
+                <input id="typing-opt-capitals" type="checkbox" checked />
+                <span>Capital letters</span>
+              </label>
+              <label class="check">
+                <input id="typing-opt-punctuation" type="checkbox" checked />
+                <span>Punctuation</span>
+              </label>
+              <label class="check">
+                <input id="typing-opt-numbers" type="checkbox" />
+                <span>Numbers <span class="hint">(word drills)</span></span>
+              </label>
+            </div>
+
+            <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+            <span class="label">Mode</span>
+            <div class="row" id="typing-timers">
+              <button class="btn btn--sm" data-typing-timer="0" aria-pressed="true">Finish the text</button>
+              <button class="btn btn--sm" data-typing-timer="30" aria-pressed="false">30s</button>
+              <button class="btn btn--sm" data-typing-timer="60" aria-pressed="false">60s</button>
+              <button class="btn btn--sm" data-typing-timer="120" aria-pressed="false">120s</button>
+            </div>
+
+            <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+            <div class="row-between">
+              <span class="label">My paragraphs</span>
+              <span id="typing-fav-count" class="badge badge--muted">0 saved</span>
+            </div>
+            <select id="typing-fav-select" class="input" aria-label="Saved paragraphs"></select>
+            <div class="row">
+              <button id="typing-fav-load" class="btn btn--sm btn--mint">↧ Practise</button>
+              <button id="typing-fav-save" class="btn btn--sm btn--lav">❤ Save current</button>
+              <button
+                id="typing-fav-delete"
+                class="btn btn--sm btn--danger"
+                aria-label="Delete the selected saved passage"
+              >
+                🗑
+              </button>
+            </div>
+          </aside>
         </div>
 
         <div class="card">
@@ -374,6 +512,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <script src="/js/api.js"></script>
+    <script src="/js/favourites.js"></script>
     <script src="/js/reader.js"></script>
     <script src="/js/typing.js"></script>
     <script src="/js/analytics.js"></script>

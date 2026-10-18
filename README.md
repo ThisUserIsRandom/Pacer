@@ -151,7 +151,7 @@ is imported into SQLite on the next start and the old file is kept as
 You can inspect the database directly:
 
 ```bash
-node --disable-warning=ExperimentalWarning -e "
+node -e "
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync('pacer.db');
   console.log(db.prepare('SELECT type, COUNT(*) n, ROUND(AVG(wpm),1) avg FROM sessions GROUP BY type').all());
@@ -209,7 +209,7 @@ npm run mock                          # listens on 127.0.0.1:8283
 LLAMA_URL=http://127.0.0.1:8283/v1/chat/completions \
 LLAMA_MODELS_URL=http://127.0.0.1:8283/v1/models \
 LLAMA_TIMEOUT_MS=2500 STATS_DB=/tmp/mock.db \
-PORT=3003 node --disable-warning=ExperimentalWarning app.js
+PORT=3003 node app.js
 
 curl -s -X POST http://127.0.0.1:3003/api/generate \
   -H 'Content-Type: application/json' -d '{"topic":"trap otters"}'

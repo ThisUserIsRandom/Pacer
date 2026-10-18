@@ -11,6 +11,17 @@ const path = require('node:path');
 const http = require('node:http');
 const express = require('express');
 
+// `node:sqlite` is still flagged experimental in Node 22. Silence just that one
+// warning here so plain `npm start` (or `node app.js`) runs with no CLI flags,
+// while every other warning keeps printing.
+process.removeAllListeners('warning');
+process.on('warning', (warning) => {
+  const isSqliteNotice =
+    warning.name === 'ExperimentalWarning' && /SQLite/i.test(String(warning.message));
+  if (isSqliteNotice) return;
+  console.warn(warning.stack || `${warning.name}: ${warning.message}`);
+});
+
 const { createLlamaClient, LlamaError, describeReason } = require('./lib/llama');
 const {
   offlineEssay,

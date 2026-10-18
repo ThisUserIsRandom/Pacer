@@ -409,8 +409,11 @@ survive "Clear history" on purpose.
 4. **Express 5 has no bare `'*'` route**; use `app.use()` for the 404 handler.
 5. **`AbortSignal.any()` hides which input aborted**, so client-cancel vs timeout
    is distinguished by checking the client signal directly, not `signal.reason`.
-6. **`node:sqlite` prints an ExperimentalWarning**; the npm scripts pass
-   `--disable-warning=ExperimentalWarning`. Plain `node app.js` still works.
+6. **`node:sqlite` prints an ExperimentalWarning.** It is filtered in `app.js`
+   (a `process.on('warning')` handler that drops only that notice), so
+   `npm start` and plain `node app.js` both run clean with **no CLI flags**.
+   Inline `node -e` snippets that open SQLite call
+   `process.removeAllListeners('warning')` for the same reason.
 7. **Frontend load order** (§6) — `api.js` first, `main.js` last.
 8. **Template grammar** (§5) — never put the topic in subject position.
 9. **`stats.json` is not the primary store any more**; don't add features to the

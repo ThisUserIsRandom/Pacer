@@ -222,7 +222,8 @@ assert 'server still responds after parallel writes' '200' "$status"
 assert "all $parallel parallel sessions were stored" "$((after + parallel))" "$(json 'parsed.total')"
 
 if [ "$backend" = 'sqlite' ]; then
-  if node --disable-warning=ExperimentalWarning -e "
+  if node -e "
+      process.removeAllListeners('warning');
       const { DatabaseSync } = require('node:sqlite');
       const db = new DatabaseSync(process.argv[1]);
       const rows = db.prepare('SELECT COUNT(*) AS c FROM sessions').get().c;
@@ -234,7 +235,8 @@ if [ "$backend" = 'sqlite' ]; then
     bad 'SQLite database is readable and populated' "$store_file"
   fi
 
-  integrity="$(node --disable-warning=ExperimentalWarning -e "
+  integrity="$(node -e "
+    process.removeAllListeners('warning');
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(process.argv[1]);
     const result = db.prepare('PRAGMA integrity_check').get();
@@ -282,7 +284,8 @@ request GET /api/favourites >/dev/null
 assert 'saved passage appears in the list' "$((fav_before + 1))" "$(json 'parsed.count')"
 
 if [ "$backend" = 'sqlite' ]; then
-  stored_favs="$(node --disable-warning=ExperimentalWarning -e "
+  stored_favs="$(node -e "
+    process.removeAllListeners('warning');
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(process.argv[1]);
     console.log(db.prepare('SELECT COUNT(*) AS c FROM favourites').get().c);

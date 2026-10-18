@@ -6,8 +6,8 @@
   "main": "app.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning app.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch app.js",
+    "start": "node app.js",
+    "dev": "node --watch app.js",
     "mock": "node scripts/mock-llama.js",
     "smoke": "bash scripts/smoke.sh"
   },

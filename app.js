@@ -22,7 +22,8 @@ process.on('warning', (warning) => {
   console.warn(warning.stack || `${warning.name}: ${warning.message}`);
 });
 
-const { createLlamaClient, LlamaError, describeReason } = require('./lib/llama');
+const { LlamaError, describeReason } = require('./lib/llama');
+const { createLlmRouter, DEFAULT_PROVIDER, isProvider } = require('./lib/llm');
 const {
   offlineEssay,
   countWords,
@@ -46,16 +47,23 @@ const config = {
   statsDb: process.env.STATS_DB || path.join(__dirname, 'pacer.db'),
   statsFile: process.env.STATS_FILE || path.join(__dirname, 'stats.json'),
   statsBackend: process.env.STATS_BACKEND || 'auto',
+  // In-process model. Set LOCAL_MODEL_PATH to use a GGUF from anywhere; the
+  // default is the drop folder in the project. Nothing is auto-detected.
+  localModelPath:
+    process.env.LOCAL_MODEL_PATH || path.join(__dirname, 'models', 'model.gguf'),
+  localThreads: Number(process.env.LOCAL_MODEL_THREADS) || 0,
   defaultWords: Number(process.env.ESSAY_WORDS) || DEFAULT_WORDS,
   publicDir: path.join(__dirname, 'public')
 };
 
-const llama = createLlamaClient({
-  url: config.llamaUrl,
-  modelsUrl: config.llamaModelsUrl,
-  model: config.llamaModel || undefined,
-  timeoutMs: config.llamaTimeoutMs
-});
+const llm = createLlmRouter({ config });
+
+/** Which provider the user picked, falling back to the default. */
+async function selectedProvider() {
+  const store = await storePromise;
+  const settings = await store.getSettings();
+  return isProvider(settings.provider) ? settings.provider : DEFAULT_PROVIDER;
+}
 
 // History lives in SQLite by default, falling back to JSON where node:sqlite
 // is unavailable. Any pre-existing stats.json is migrated in on first run.
@@ -98,18 +106,79 @@ function parseWordTarget(value) {
 }
 
 app.get('/api/health', async (req, res) => {
-  const [llamaStatus, store] = await Promise.all([llama.probe(), storePromise]);
+  const [providers, store] = await Promise.all([llm.status(), storePromise]);
+  const settings = await store.getSettings();
+  const provider = isProvider(settings.provider) ? settings.provider : DEFAULT_PROVIDER;
+
   res.json({
     ok: true,
     port: config.port,
     limits: { minWords: MIN_WORDS, maxWords: MAX_WORDS, defaultWords: config.defaultWords },
     storage: { backend: store.kind, file: store.file },
+    provider,
+    providers,
+    // Kept for older clients: the llama-server view.
     llama: {
       url: config.llamaUrl,
       timeoutMs: config.llamaTimeoutMs,
-      ...llamaStatus
+      reachable: providers.server.reachable,
+      model: providers.server.model,
+      detail: providers.server.detail
     }
   });
+});
+
+/* ------------------------------------------------------------- settings --- */
+
+/** GET /api/settings — the chosen provider plus both providers' status. */
+app.get('/api/settings', async (req, res, next) => {
+  try {
+    const store = await storePromise;
+    const settings = await store.getSettings();
+    const provider = isProvider(settings.provider) ? settings.provider : DEFAULT_PROVIDER;
+
+    res.json({
+      provider,
+      // `configured` is false until the user has actually picked one, which is
+      // what makes the picker open on first run.
+      configured: isProvider(settings.provider),
+      settings: Object.assign({}, settings, { provider }),
+      providers: await llm.status(),
+      limits: { minWords: MIN_WORDS, maxWords: MAX_WORDS, defaultWords: config.defaultWords }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** PUT /api/settings — choose which provider generates essays. */
+app.put('/api/settings', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+
+    if (body.provider === undefined) {
+      return res.status(400).json({ error: 'Field "provider" is required.' });
+    }
+    if (!isProvider(body.provider)) {
+      return res.status(400).json({ error: 'Field "provider" must be "server" or "local".' });
+    }
+
+    const store = await storePromise;
+    const saved = await store.setSettings({ provider: body.provider });
+    const provider = isProvider(saved.provider) ? saved.provider : DEFAULT_PROVIDER;
+
+    // Loading the built-in model takes a moment; start now so the first essay is quick.
+    if (provider === 'local') llm.warmLocal().catch(() => {});
+
+    res.json({
+      provider,
+      configured: true,
+      settings: Object.assign({}, saved, { provider }),
+      providers: await llm.status()
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**
@@ -138,9 +207,11 @@ app.post('/api/generate', async (req, res) => {
   });
 
   const startedAt = Date.now();
+  const provider = await selectedProvider();
 
   try {
-    const result = await llama.generateEssay(topic || 'the little joys of everyday life', {
+    const client = llm.get(provider);
+    const result = await client.generateEssay(topic || 'the little joys of everyday life', {
       targetWords,
       signal: controller.signal
     });
@@ -149,8 +220,9 @@ app.post('/api/generate', async (req, res) => {
       text: result.text,
       topic: topic || 'the little joys of everyday life',
       source: 'llama',
+      provider,
       wordCount: countWords(result.text),
-      targetWords: result.targetWords,
+      targetWords: result.targetWords || targetWords,
       model: result.model,
       durationMs: result.durationMs,
       tokPerSec: result.tokPerSec,
@@ -161,7 +233,7 @@ app.post('/api/generate', async (req, res) => {
     const detail = error instanceof LlamaError ? error.message : String(error && error.message);
 
     if (reason !== 'cancelled') {
-      console.warn(`[generate] llama unavailable (${reason}): ${detail} — serving offline essay`);
+      console.warn(`[generate] ${provider} provider unavailable (${reason}): ${detail} — serving offline essay`);
     }
 
     const fallback = offlineEssay(topic, targetWords);
@@ -173,6 +245,7 @@ app.post('/api/generate', async (req, res) => {
       wordCount: countWords(fallback.text),
       targetWords,
       matched: fallback.matched,
+      provider,
       fallbackReason: describeReason(reason),
       fallbackDetail: reason,
       durationMs: Date.now() - startedAt
@@ -292,29 +365,46 @@ async function start() {
     process.exit(1);
   });
 
-  server.listen(config.port, config.host, () => {
+  server.listen(config.port, config.host, async () => {
+    const provider = await selectedProvider().catch(() => DEFAULT_PROVIDER);
+
     console.log('');
     console.log('  🌈  Pacer is ready');
     console.log(`      http://${config.host}:${config.port}`);
     console.log(`      history: ${store.kind === 'sqlite' ? 'SQLite' : 'JSON'} → ${store.file}`);
     console.log(`      essays: ${MIN_WORDS}-${MAX_WORDS} words (default ${config.defaultWords})`);
+    console.log(`      provider: ${provider === 'local' ? '🧠 built-in model' : '✨ llama-server'}`);
     console.log(`      llama-server: ${config.llamaUrl} (timeout ${config.llamaTimeoutMs}ms)`);
+    if (provider === 'local') console.log(`      built-in model: ${config.localModelPath}`);
     console.log('');
-    llama
-      .probe()
-      .then((status) => {
-        if (status.reachable) {
-          console.log(`  ✨  llama-server reachable — model: ${status.model}`);
-        } else {
-          console.log(`  📴  llama-server unreachable (${status.detail}) — offline essays will be used`);
-        }
-        console.log('');
-      })
-      .catch(() => {});
+
+    if (provider === 'local') {
+      // Only load the model when it is the chosen provider.
+      llm
+        .warmLocal()
+        .then((ok) => {
+          if (!ok) {
+            console.log('  ⚠  built-in model not available — offline essays will be used');
+            console.log('     drop a .gguf at models/model.gguf or run: npm run model:download');
+            console.log('');
+          }
+        })
+        .catch(() => {});
+    } else {
+      llm
+        .status()
+        .then(({ server: srv }) => {
+          if (srv.reachable) console.log(`  ✨  llama-server reachable — model: ${srv.model}`);
+          else console.log(`  📴  llama-server unreachable (${srv.detail}) — offline essays will be used`);
+          console.log('');
+        })
+        .catch(() => {});
+    }
   });
 
   // Close the database cleanly so WAL contents are checkpointed.
   const shutdown = async () => {
+    await llm.dispose().catch(() => {});
     await store.close();
     process.exit(0);
   };
@@ -329,4 +419,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, start, config, llama, storePromise, parseWordTarget };
+module.exports = { app, start, config, llm, storePromise, parseWordTarget };

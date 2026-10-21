@@ -511,7 +511,8 @@ input[type='range'] {
   border: 1px solid rgba(255, 255, 255, 0.9);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 253, 247, 0.86));
   padding: 0.5rem 0.25rem;
-  scroll-behavior: smooth;
+  /* Scrolling is animated frame-by-frame in reader.js — a CSS smooth-scroll
+     here would fight it and reintroduce the stutter. */
 }
 
 .reader-track {
@@ -548,24 +549,49 @@ input[type='range'] {
 
 .rw--current {
   color: #4b3a22;
-  background: linear-gradient(135deg, rgba(253, 230, 138, 0.9), rgba(253, 186, 116, 0.75));
-  box-shadow: 0 2px 12px rgba(251, 191, 36, 0.4);
+  background: linear-gradient(135deg, rgba(253, 230, 138, 0.7), rgba(253, 186, 116, 0.48));
+  box-shadow: 0 1px 5px rgba(251, 191, 36, 0.16);
 }
 
-/* The glowing rainbow pacer line.
-   It is positioned just BELOW the current line's glyphs (see pacerTargetY() in
+/* The pacer guide line.
+   Positioned just BELOW the current line's glyphs (see pacerTargetY() in
    reader.js) so it acts as a reading rule in the leading gap rather than
-   striking through the words. z-index keeps it under the text as well. */
+   striking through the words.
+
+   Defaults to the calm "soft" style: a thin, low-opacity rule with no animation.
+   The old continuous rainbow shimmer was visually loud and pulled the eye away
+   from the words, so it is now opt-in via `rainbow`, with `off` for no line. */
 .pacer {
   position: absolute;
   left: 0;
   right: 0;
   top: 0;
-  height: 5px;
+  height: 4px;
   z-index: 0;
   border-radius: var(--radius-pill);
   pointer-events: none;
   opacity: 0;
+  transition: opacity 0.35s ease;
+  will-change: transform;
+}
+
+.pacer--soft {
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    rgba(253, 230, 138, 0.95),
+    rgba(253, 186, 116, 0.85) 55%,
+    rgba(221, 214, 254, 0.95)
+  );
+  box-shadow: 0 1px 4px rgba(251, 191, 36, 0.18);
+}
+
+.pacer--soft.is-active {
+  opacity: 0.45;
+}
+
+.pacer--rainbow {
+  height: 5px;
   background: linear-gradient(
     90deg,
     var(--coral),
@@ -576,26 +602,17 @@ input[type='range'] {
     var(--lavender),
     var(--coral)
   );
-  background-size: 200% 100%;
   box-shadow:
     0 0 10px rgba(251, 191, 36, 0.7),
     0 0 22px rgba(167, 139, 250, 0.4);
-  transition: opacity 0.3s ease;
-  will-change: transform;
 }
 
-.pacer.is-active {
-  opacity: 1;
-  animation: pacer-shimmer 3.6s linear infinite;
+.pacer--rainbow.is-active {
+  opacity: 0.9;
 }
 
-@keyframes pacer-shimmer {
-  from {
-    background-position: 0% 50%;
-  }
-  to {
-    background-position: 200% 50%;
-  }
+.pacer--off {
+  display: none;
 }
 
 .wpm-display,
@@ -618,6 +635,7 @@ input[type='range'] {
   padding: 1.5rem 1.6rem;
   max-height: 16rem;
   overflow-y: auto;
+  overscroll-behavior: contain;
   cursor: text;
 }
 
@@ -766,6 +784,74 @@ input[type='range'] {
   font-size: 2rem;
 }
 
+/* ---------------------------------------------------- provider dialog -- */
+
+.dialog {
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: var(--radius-card);
+  background: linear-gradient(180deg, #fffdf7, #fff);
+  box-shadow: 0 24px 70px rgba(90, 78, 130, 0.28);
+  padding: 1.35rem;
+  width: min(34rem, calc(100vw - 2rem));
+  color: var(--ink);
+}
+
+.dialog::backdrop {
+  background: rgba(75, 68, 83, 0.32);
+  backdrop-filter: blur(3px);
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 1.15rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
+}
+
+.choice:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-soft);
+}
+
+.choice:has(input:checked) {
+  border-color: var(--lavender-deep);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.25);
+  background: linear-gradient(135deg, rgba(253, 230, 138, 0.35), rgba(221, 214, 254, 0.4));
+}
+
+.choice input[type='radio'] {
+  margin-top: 0.25rem;
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--lavender-deep);
+  flex: none;
+  cursor: pointer;
+}
+
+.choice__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.choice__body strong {
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+}
+
+.choice__body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.74rem;
+  word-break: break-all;
+  color: var(--ink-faint);
+}
+
 /* ------------------------------------------------------------- feedback -- */
 
 .toast-host {
@@ -904,10 +990,6 @@ input[type='range'] {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
-  }
-
-  .pacer {
-    animation: none;
   }
 
   .typing-caret {

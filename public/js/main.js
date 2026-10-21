@@ -53,8 +53,9 @@
 
     if (name === 'analytics' && Pacer.analytics) Pacer.analytics.load();
     if (name === 'reading' && Pacer.reader) {
-      // The reader measures word positions, which are only valid when visible.
-      Pacer.reader.state.lastIndex = -1;
+      // Word positions are only valid while the panel is visible, so re-measure.
+      // (Previously this reset lastIndex, which left a stale word highlighted.)
+      Pacer.reader.invalidateLayout();
     }
   }
 
@@ -87,29 +88,164 @@
 
   /** Shorten a model id for the header badge. */
   function shortModel(model) {
-    if (!model) return 'local model';
-    const clean = String(model).replace(/\.gguf$/i, '');
+    if (!model) return '';
+    const clean = String(model).replace(/\.gguf$/i, '').replace(/^.*[\\/]/, '');
     return clean.length > 26 ? `${clean.slice(0, 25)}…` : clean;
   }
 
-  async function loadHealth() {
+  const providerUi = { data: null };
+
+  /** Header badge: which provider is active and whether it is usable. */
+  function renderProviderBadge(data) {
     const badge = document.getElementById('llama-badge');
     if (!badge) return;
 
-    try {
-      const health = await Pacer.api.health();
-      if (health.llama && health.llama.reachable) {
+    if (data.provider === 'local') {
+      const local = data.providers.local;
+      if (local.available) {
         badge.className = 'badge badge--llama';
-        badge.textContent = `✨ ${shortModel(health.llama.model)} ready`;
-        badge.title = `llama-server reachable at ${health.llama.url}`;
+        badge.textContent = `🧠 built-in${local.model ? ` · ${shortModel(local.model)}` : ''}`;
+        badge.title = `${local.modelPath}${local.loaded ? ' — loaded' : ' — loads on first use'}`;
       } else {
         badge.className = 'badge badge--offline';
-        badge.textContent = '📴 llama-server offline · built-in essays ready';
-        badge.title = health.llama ? health.llama.detail : 'unreachable';
+        badge.textContent = '🧠 built-in · no model file';
+        badge.title = `${local.modelPath} — run: npm run model:download`;
       }
-    } catch {
+      return;
+    }
+
+    const server = data.providers.server;
+    if (server.reachable) {
+      badge.className = 'badge badge--llama';
+      badge.textContent = `✨ llama-server${server.model ? ` · ${shortModel(server.model)}` : ''}`;
+      badge.title = server.url;
+    } else {
       badge.className = 'badge badge--offline';
-      badge.textContent = '📴 server unreachable';
+      badge.textContent = '📴 llama-server offline';
+      badge.title = server.detail;
+    }
+  }
+
+  /** Fill the picker from live provider status. */
+  function renderProviderDialog(data, selected) {
+    const server = data.providers.server;
+    const local = data.providers.local;
+
+    const serverStatus = document.getElementById('provider-server-status');
+    const serverUrl = document.getElementById('provider-server-url');
+    const localStatus = document.getElementById('provider-local-status');
+    const localPath = document.getElementById('provider-local-path');
+    const localHelp = document.getElementById('provider-local-help');
+    const localRadio = document.getElementById('provider-local');
+
+    if (serverStatus) {
+      serverStatus.textContent = server.reachable
+        ? `reachable${server.model ? ` · ${server.model}` : ''}`
+        : `not reachable — ${server.detail}`;
+    }
+    if (serverUrl) serverUrl.textContent = server.url;
+    if (localStatus) {
+      localStatus.textContent = local.available
+        ? `ready${local.model ? ` · ${local.model}` : ''}${local.loaded ? ' · loaded' : ' · loads on first use'}`
+        : 'no model file found';
+    }
+    if (localPath) localPath.textContent = local.modelPath;
+    if (localHelp) localHelp.hidden = Boolean(local.available);
+    if (localRadio) localRadio.disabled = !local.available;
+
+    const choice = selected || data.provider;
+    const wanted = document.querySelector(`#provider-dialog input[value="${choice}"]`);
+    if (wanted && !wanted.disabled) wanted.checked = true;
+    else {
+      const fallback = document.getElementById('provider-server');
+      if (fallback) fallback.checked = true;
+    }
+  }
+
+  async function refreshProvider(options) {
+    try {
+      const data = await Pacer.api.getSettings();
+      providerUi.data = data;
+      renderProviderBadge(data);
+      renderProviderDialog(data);
+
+      // First run: nothing has been chosen yet, so ask.
+      if (options && options.openIfUnset && data.configured === false) openProviderDialog();
+      return data;
+    } catch {
+      const badge = document.getElementById('llama-badge');
+      if (badge) {
+        badge.className = 'badge badge--offline';
+        badge.textContent = '📴 server unreachable';
+      }
+      return null;
+    }
+  }
+
+  function openProviderDialog() {
+    const dialog = document.getElementById('provider-dialog');
+    if (!dialog) return;
+    if (providerUi.data) renderProviderDialog(providerUi.data);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  }
+
+  function closeProviderDialog() {
+    const dialog = document.getElementById('provider-dialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  async function saveProvider() {
+    const picked = document.querySelector('#provider-dialog input[name="provider"]:checked');
+    if (!picked) return;
+
+    const button = document.getElementById('provider-save');
+    const note = document.getElementById('provider-note');
+    button.disabled = true;
+    note.textContent = picked.value === 'local' ? 'Loading the built-in model…' : 'Saving…';
+
+    try {
+      const data = await Pacer.api.saveSettings({ provider: picked.value });
+      providerUi.data = data;
+      renderProviderBadge(data);
+      renderProviderDialog(data, data.provider);
+      closeProviderDialog();
+      Pacer.ui.toast(
+        data.provider === 'local'
+          ? 'Essays will come from the built-in model 🧠'
+          : 'Essays will come from your llama-server ✨',
+        'ok'
+      );
+    } catch (error) {
+      note.textContent = error.message;
+      Pacer.ui.toast(`Could not save the choice: ${error.message}`, 'error');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function bindProviderPicker() {
+    const open = document.getElementById('provider-open');
+    const close = document.getElementById('provider-close');
+    const save = document.getElementById('provider-save');
+    const dialog = document.getElementById('provider-dialog');
+
+    if (open) {
+      open.addEventListener('click', async () => {
+        await refreshProvider();
+        openProviderDialog();
+      });
+    }
+    if (close) close.addEventListener('click', closeProviderDialog);
+    if (save) save.addEventListener('click', saveProvider);
+
+    // Clicking the backdrop closes it.
+    if (dialog) {
+      dialog.addEventListener('click', (event) => {
+        if (event.target === dialog) closeProviderDialog();
+      });
     }
   }
 
@@ -124,8 +260,9 @@
     // Support back/forward and manually edited hashes.
     window.addEventListener('hashchange', () => setTab(tabFromHash()));
 
-    loadHealth();
-    window.setInterval(loadHealth, 60000);
+    bindProviderPicker();
+    refreshProvider({ openIfUnset: true });
+    window.setInterval(() => refreshProvider(), 60000);
   }
 
   Pacer.main = main;

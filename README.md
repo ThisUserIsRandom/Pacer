@@ -13,7 +13,10 @@ on-screen keyboard, and Chart.js progress graphs — all served from your machin
 Pacer/
 ├── app.js                    # Express server (routes, config)
 ├── lib/
+│   ├── llm.js                # provider registry (server | built-in)
 │   ├── llama.js              # llama-server client (thinking-off, timeout, validation)
+│   ├── llm-local.js          # in-process GGUF via node-llama-cpp
+│   ├── essay.js              # shared sanitise / validate / length logic
 │   ├── fallback-essays.js    # offline essay library + length scaling
 │   ├── stats-db.js           # SQLite store: history + saved passages
 │   ├── stats-store.js        # JSON store (fallback) + shared validation
@@ -25,7 +28,8 @@ Pacer/
 ├── scripts/
 │   ├── smoke.sh              # endpoint test suite
 │   └── mock-llama.js         # fake llama-server for failure-path testing
-├── pacer.db                  # session history + saved passages (created on first run)
+├── models/                   # drop a GGUF here for the built-in model (git-ignored)
+├── pacer.db                  # history, saved passages and settings (created on first run)
 └── stats.json                # only used if SQLite is unavailable
 ```
 
@@ -66,6 +70,8 @@ Requires **Node 22+** (for the built-in SQLite module).
 | `STATS_DB` | `./pacer.db` | SQLite database path |
 | `STATS_FILE` | `./stats.json` | JSON store path (fallback + legacy import source) |
 | `STATS_BACKEND` | `auto` | `auto`, `sqlite`, or `json` |
+| `LOCAL_MODEL_PATH` | `./models/model.gguf` | GGUF used by the built-in provider |
+| `LOCAL_MODEL_THREADS` | `0` (auto) | CPU threads for the built-in model |
 
 ## Using it
 
@@ -73,9 +79,12 @@ Requires **Node 22+** (for the built-in SQLite module).
 
 - Type a topic (or tap a chip from the offline sample library) and press
   **Generate text**.
-- **Length is adjustable** from 50 to 1200 words with the stepper or slider, and
+- **Length is adjustable** from 50 to **5000** words with the stepper or slider, and
   your choice is remembered. Longer passages simply take the local model longer
   to write — the sidebar tells you roughly how long.
+- **Pacer style** — *Soft* (default), *Rainbow* or *Off*. Soft is a thin,
+  low-opacity guide line with no animation; Rainbow is the vivid version; Off
+  leaves only the highlighted word. Your choice is remembered.
 - **`W`** faster · **`S`** slower · **`Space`** play / pause. Shift multiplies
   the WPM step by 2.5×. Hotkeys are ignored while a text field has focus.
 - Click any word to jump the pacer there. **Save session** logs your target WPM
@@ -94,14 +103,14 @@ Pick a **source** — the drill rebuilds instantly when you change options:
 
 **Drill options** (all remembered between visits):
 
-- **Drill length** — 10 to 60 words per drill.
+- **Drill length** — 10 to **1000** words per drill.
 - **Include** — toggle **capital letters**, **punctuation** and **numbers**
   (numbers apply to word drills). Turning capitals or punctuation off strips them
   from prose drills too, which makes for a much calmer warm-up.
-- **Mode** — *Finish the text*, or a **30 / 60 / 120 second** timed drill. Timed
+- **Mode** — *Finish the text*, or a **30 s / 1 / 2 / 5 / 10 minute** timed drill. Timed
   drills build extra text (≈2.2 words per second) so you never run out mid-run,
   and the timer counts down in place of the elapsed clock.
-- **Essay length** — 50 to 1200 words when using the AI source.
+- **Essay length** — 50 to 5000 words when using the AI source.
 
 Characters turn **mint** when correct and **pastel coral** when wrong; the virtual
 keyboard highlights the next key and flashes on every press.
@@ -159,6 +168,38 @@ node -e "
 "
 ```
 
+## Two ways to generate essays
+
+On first run Pacer asks where essays should come from. You can switch any time
+with the **⚙ Model** button in the header.
+
+| | Your llama-server | Built-in model |
+| --- | --- | --- |
+| Runs | separate process over HTTP | **inside the Node process** |
+| Setup | you manage the server | drop a `.gguf` in `models/` |
+| Ports | 8282 (configurable) | none |
+| Speed | depends on your model | ~14 words/s for a 0.6B on CPU |
+| Good for | big, high-quality models | zero-setup, always available |
+
+### Built-in model
+
+```bash
+npm run model:download                      # Qwen3-0.6B Q8_0, ~640 MB
+npm run model:download -- --url <gguf-url>  # any GGUF
+npm run model:link -- /path/to/model.gguf   # reuse one you already have
+```
+
+Pacer looks at exactly one path — `models/model.gguf` — or `LOCAL_MODEL_PATH` if
+you set it. It never scans for models, and the model is **only loaded when you
+pick the built-in option** (≈1.3 s, stays resident afterwards).
+
+A small model like Qwen3-0.6B writes short passages on its own, so Pacer asks it
+to continue until the requested length is (roughly) reached — a 300-word request
+arrives in about 20 s on a 12-core CPU.
+
+If the model file is missing, generating still works: you get the built-in
+offline essay and the reason is shown in the badge.
+
 ## How generation works
 
 `POST /api/generate` proxies to your local llama-server. A few details worth
@@ -175,6 +216,12 @@ knowing, because they were learned the hard way with a local thinking model:
 3. **Output is validated**: empty text, reasoning-only responses, and anything
    under half the requested length are rejected.
 4. **Length is normalised** to the target — the model tends to overshoot.
+5. **Repeated material is removed.** Small models loop on rhetorical templates
+   ("we are reminded that…") and restate them with slight paraphrases. After
+   generation, `lib/essay.js` drops sentences that duplicate an earlier one
+   *or* reuse a 7-word run already seen, so paraphrased repeats are caught too.
+   Measured on Qwen3-0.6B: duplicate sentences fell from 13–23 % to **0 %**
+   while length and coherence stayed intact.
 5. When any of that fails you get a **built-in essay** instead, matched to your
    topic by keyword, or composed from a pool of topic-aware sentence variants.
    The app is fully usable with llama-server switched off.

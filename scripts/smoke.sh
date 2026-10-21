@@ -304,6 +304,38 @@ assert 'deleting an unknown passage returns 404' '404' "$status"
 request GET /api/favourites >/dev/null
 assert 'list returns to its original size' "$fav_before" "$(json 'parsed.count')"
 
+# ------------------------------------------------------------- providers --
+section 'provider settings (llama-server vs built-in model)'
+
+status="$(request GET /api/settings)"
+assert 'GET /api/settings returns 200' '200' "$status"
+orig_provider="$(json 'parsed.provider')"
+assert 'a provider is reported' "$(json '["server","local"].includes(parsed.provider) ? "yes" : "no"')" 'yes'
+assert 'both providers expose status' \
+  "$(json 'parsed.providers.server && parsed.providers.local ? "yes" : "no"')" 'yes'
+printf '      active provider: %s | built-in model available: %s\n' \
+  "$orig_provider" "$(json 'parsed.providers.local.available')"
+
+status="$(request PUT /api/settings -H 'Content-Type: application/json' -d '{"provider":"nope"}')"
+assert 'invalid provider is rejected' '400' "$status"
+
+status="$(request PUT /api/settings -H 'Content-Type: application/json' -d '{}')"
+assert 'missing provider is rejected' '400' "$status"
+
+status="$(request PUT /api/settings -H 'Content-Type: application/json' -d '{"provider":"server"}')"
+assert 'selecting llama-server works' '200' "$status"
+assert 'selection is echoed back' 'server' "$(json 'parsed.provider')"
+assert 'selection marks settings as configured' 'true' "$(json 'parsed.configured')"
+
+status="$(request PUT /api/settings -H 'Content-Type: application/json' -d '{"provider":"local"}')"
+assert 'selecting the built-in model works' '200' "$status"
+assert 'built-in selection is echoed back' 'local' "$(json 'parsed.provider')"
+
+# Put the user's original choice back so the suite leaves no trace.
+request PUT /api/settings -H 'Content-Type: application/json' -d "{\"provider\":\"$orig_provider\"}" >/dev/null
+request GET /api/settings >/dev/null
+assert 'original provider restored' "$orig_provider" "$(json 'parsed.provider')"
+
 # ------------------------------------------------------------------ cleanup
 section 'DELETE /api/stats'
 

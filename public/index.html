@@ -60,7 +60,10 @@
             <p class="subtitle">Speed reading &amp; touch typing practice, in cheerful pastel.</p>
           </div>
           <div class="spacer"></div>
-          <span id="llama-badge" class="badge badge--muted">checking llama-server…</span>
+          <button id="provider-open" class="btn btn--sm" title="Choose where essays come from">
+            ⚙ Model
+          </button>
+          <span id="llama-badge" class="badge badge--muted">checking model…</span>
         </div>
 
         <nav class="tablist" role="tablist" aria-label="Pacer sections">
@@ -187,7 +190,7 @@
             id="length-range"
             type="range"
             min="50"
-            max="1200"
+            max="5000"
             step="50"
             value="300"
             aria-label="Target essay length in words"
@@ -221,6 +224,16 @@
             At <strong id="reading-pace-note">250</strong> wpm this text takes about
             <strong id="reading-pace-time">0:00</strong>.
           </p>
+
+          <hr class="w-full border-0 border-t border-lavender/50 my-1" />
+
+          <span class="label">Pacer style</span>
+          <div class="row" id="pacer-styles">
+            <button class="btn btn--sm" data-pacer-style="soft" aria-pressed="true">Soft</button>
+            <button class="btn btn--sm" data-pacer-style="rainbow" aria-pressed="false">Rainbow</button>
+            <button class="btn btn--sm" data-pacer-style="off" aria-pressed="false">Off</button>
+          </div>
+          <p class="hint">Soft is a quiet guide line; Off leaves only the word highlight.</p>
 
           <div class="stack-sm">
             <span class="label">Offline sample library</span>
@@ -357,7 +370,7 @@
                 id="typing-length-range"
                 type="range"
                 min="50"
-                max="1200"
+                max="5000"
                 step="50"
                 value="300"
                 class="w-full accent-mint"
@@ -374,8 +387,8 @@
               id="typing-drill-range"
               type="range"
               min="10"
-              max="60"
-              step="2"
+              max="1000"
+              step="10"
               value="28"
               class="w-full accent-lavender"
               aria-label="Words per drill"
@@ -410,6 +423,8 @@
               <button class="btn btn--sm" data-typing-timer="30" aria-pressed="false">30s</button>
               <button class="btn btn--sm" data-typing-timer="60" aria-pressed="false">60s</button>
               <button class="btn btn--sm" data-typing-timer="120" aria-pressed="false">120s</button>
+              <button class="btn btn--sm" data-typing-timer="300" aria-pressed="false">5 min</button>
+              <button class="btn btn--sm" data-typing-timer="600" aria-pressed="false">10 min</button>
             </div>
 
             <hr class="w-full border-0 border-t border-lavender/50 my-1" />
@@ -507,6 +522,49 @@
         </div>
       </section>
     </div>
+
+    <dialog id="provider-dialog" class="dialog" aria-labelledby="provider-title">
+      <div class="stack-sm">
+        <div class="row-between">
+          <h2 class="card-title" id="provider-title">
+            <span class="dot"></span>Where should essays come from?
+          </h2>
+          <button id="provider-close" class="btn btn--sm" aria-label="Close">✕</button>
+        </div>
+        <p class="hint">
+          Pick one now — you can switch any time with the ⚙ Model button.
+        </p>
+
+        <label class="choice" for="provider-server">
+          <input type="radio" name="provider" id="provider-server" value="server" />
+          <span class="choice__body">
+            <strong>Your llama-server</strong>
+            <span class="hint" id="provider-server-status">checking…</span>
+            <code class="hint" id="provider-server-url"></code>
+          </span>
+        </label>
+
+        <label class="choice" for="provider-local">
+          <input type="radio" name="provider" id="provider-local" value="local" />
+          <span class="choice__body">
+            <strong>Built-in model (runs in this app)</strong>
+            <span class="hint" id="provider-local-status">checking…</span>
+            <code class="hint" id="provider-local-path"></code>
+          </span>
+        </label>
+
+        <p class="hint" id="provider-local-help" hidden>
+          No model file yet. Put a GGUF at <code>models/model.gguf</code>, or run
+          <code>npm run model:download</code>.
+        </p>
+
+        <div class="row">
+          <button id="provider-save" class="btn btn--primary">Use this provider</button>
+          <div class="spacer"></div>
+          <span id="provider-note" class="hint" aria-live="polite"></span>
+        </div>
+      </div>
+    </dialog>
 
     <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
 

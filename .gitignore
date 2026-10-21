@@ -12,6 +12,13 @@ stats.json.tmp
 stats.json.corrupt-*
 stats.json.migrated-*
 
+# Local model weights (never committed — see models/README.md)
+models/*.gguf
+models/*.ggml
+models/*.bin
+models/*.safetensors
+models/*.part
+
 # Scratch space used by local verification runs
 .test-tmp/
 

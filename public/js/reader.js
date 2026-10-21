@@ -9,8 +9,9 @@
   const MAX_WPM = 900;
   const WPM_KEY = 'pacer.wpm';
   const LENGTH_KEY = 'pacer.words';
+  const PACER_STYLE_KEY = 'pacer.style';
   const MIN_WORDS = 50;
-  const MAX_WORDS = 1200;
+  const MAX_WORDS = 5000;
   const MIN_WORDS_TO_LOG = 20;
   /** Gap between the bottom of the current line's glyphs and the pacer rule. */
   const PACER_GAP = 4;
@@ -50,6 +51,10 @@
     pacerY: 0,
     pacerCacheIndex: -1,
     pacerCacheY: 0,
+    scrollTarget: 0,
+    reduceMotion: false,
+    currentSpan: null,
+    pacerStyle: 'soft',
     lastIndex: -1,
     logged: false,
     topic: '',
@@ -96,6 +101,7 @@
     el.favSave = document.getElementById('reading-fav-save');
     el.favDelete = document.getElementById('reading-fav-delete');
     el.favCount = document.getElementById('reading-fav-count');
+    el.pacerStyles = document.getElementById('pacer-styles');
   }
 
   /* ------------------------------------------------------------- rendering */
@@ -130,10 +136,14 @@
   /** Apply highlight classes for the word currently under the pacer. */
   function paintIndex(index) {
     const previous = state.lastIndex;
-    if (previous === index) return;
+    if (previous === index && state.currentSpan === state.spans[index]) return;
 
-    if (previous >= 0 && state.spans[previous]) {
-      state.spans[previous].classList.remove('rw--current');
+    // Always clear the span we actually painted. Relying on lastIndex alone left
+    // a stale highlight behind whenever lastIndex was reset to -1 (e.g. on a tab
+    // switch), so two words could end up looking current at once.
+    if (state.currentSpan) {
+      state.currentSpan.classList.remove('rw--current');
+      state.currentSpan = null;
     }
 
     if (index > previous) {
@@ -148,7 +158,10 @@
       }
     }
 
-    if (state.spans[index]) state.spans[index].classList.add('rw--current');
+    if (state.spans[index]) {
+      state.spans[index].classList.add('rw--current');
+      state.currentSpan = state.spans[index];
+    }
     state.lastIndex = index;
   }
 
@@ -209,20 +222,54 @@
     return y;
   }
 
-  function keepInView(index) {
-    const span = state.spans[index];
-    if (!span || !el.viewport) return;
+  /**
+   * Keep the current word in the comfortable band of the viewport.
+   *
+   * The old implementation called scrollTo({behavior:'smooth'}) every frame,
+   * which restarted the browser's smooth-scroll animation on each tick and made
+   * the text stutter. Instead we compute a target once and ease towards it from
+   * the existing requestAnimationFrame loop, so the motion is frame-synced and
+   * can never stack.
+   */
+  function updateScroll(dt) {
+    const viewport = el.viewport;
+    const span = state.spans[currentIndex()];
+    if (!viewport || !span) return;
 
-    const top = span.offsetTop;
-    const height = el.viewport.clientHeight;
-    const scrollTop = el.viewport.scrollTop;
-    const comfortableTop = scrollTop + height * 0.2;
-    const comfortableBottom = scrollTop + height * 0.72;
+    const height = viewport.clientHeight;
+    if (height === 0) return;
 
-    if (top < comfortableTop || top > comfortableBottom) {
-      const target = Math.max(0, top - height * 0.35);
-      el.viewport.scrollTo({ top: target, behavior: 'smooth' });
+    const maxScroll = Math.max(0, viewport.scrollHeight - height);
+    const wordTop = span.offsetTop;
+    const wordBottom = wordTop + span.offsetHeight;
+
+    // Band measured against the *target* position, not the live one: using the
+    // live scrollTop creates a feedback loop that re-targets endlessly.
+    const bandTop = state.scrollTarget + height * 0.22;
+    const bandBottom = state.scrollTarget + height * 0.72;
+
+    if (wordTop < bandTop || wordBottom > bandBottom) {
+      state.scrollTarget = clamp(wordTop - height * 0.3, 0, maxScroll);
     }
+    state.scrollTarget = clamp(state.scrollTarget, 0, maxScroll);
+
+    const difference = state.scrollTarget - viewport.scrollTop;
+    if (Math.abs(difference) < 0.4) {
+      viewport.scrollTop = state.scrollTarget;
+      return;
+    }
+
+    // Frame-rate independent easing (no dt accumulated across pauses).
+    const alpha = state.reduceMotion ? 1 : 1 - Math.exp(-dt * 12);
+    viewport.scrollTop += difference * alpha;
+  }
+
+  /** Jump the scroll position without animating (reset, seek, resize). */
+  function snapScroll(target) {
+    if (!el.viewport) return;
+    const maxScroll = Math.max(0, el.viewport.scrollHeight - el.viewport.clientHeight);
+    state.scrollTarget = clamp(target, 0, maxScroll);
+    el.viewport.scrollTop = state.scrollTarget;
   }
 
   /* ------------------------------------------------------------- playback */
@@ -230,8 +277,9 @@
   function frame(timestamp) {
     if (!state.playing) return;
 
+    let dt = 0;
     if (state.lastTs) {
-      const dt = Math.min(0.25, (timestamp - state.lastTs) / 1000);
+      dt = Math.min(0.25, (timestamp - state.lastTs) / 1000);
       state.elapsedMs += dt * 1000;
       state.wordsRead = Math.min(
         state.words.length,
@@ -249,7 +297,7 @@
     state.pacerY += (target - state.pacerY) * smoothing;
     el.pacer.style.transform = `translateY(${state.pacerY.toFixed(2)}px)`;
 
-    keepInView(index);
+    updateScroll(dt);
     updateReadout();
 
     if (state.wordsRead >= state.words.length) {
@@ -296,10 +344,11 @@
     el.pacer.style.transform = `translateY(${state.pacerY.toFixed(2)}px)`;
 
     state.spans.forEach((span) => span.classList.remove('rw--done', 'rw--current'));
-    if (state.spans[0]) state.spans[0].classList.add('rw--current');
+    state.currentSpan = state.spans[0] || null;
+    if (state.currentSpan) state.currentSpan.classList.add('rw--current');
     state.lastIndex = 0;
 
-    if (el.viewport) el.viewport.scrollTo({ top: 0, behavior: 'auto' });
+    snapScroll(0);
     updateReadout();
   }
 
@@ -359,6 +408,32 @@
     persistLength();
   }
 
+  /* ---------------------------------------------------------- pacer style */
+
+  const PACER_STYLES = ['soft', 'rainbow', 'off'];
+
+  function setPacerStyle(style) {
+    const next = PACER_STYLES.includes(style) ? style : 'soft';
+    state.pacerStyle = next;
+
+    PACER_STYLES.forEach((name) => el.pacer.classList.remove(`pacer--${name}`));
+    el.pacer.classList.add(`pacer--${next}`);
+
+    if (el.pacerStyles) {
+      Array.from(el.pacerStyles.querySelectorAll('[data-pacer-style]')).forEach((button) => {
+        const active = button.dataset.pacerStyle === next;
+        button.setAttribute('aria-pressed', String(active));
+        button.classList.toggle('btn--lav', active);
+      });
+    }
+
+    try {
+      window.localStorage.setItem(PACER_STYLE_KEY, next);
+    } catch {
+      /* storage unavailable; the choice simply is not remembered */
+    }
+  }
+
   /* -------------------------------------------------------------- history */
 
   async function logSession(auto) {
@@ -403,8 +478,9 @@
     if (result.source === 'llama') {
       const seconds = result.durationMs ? ` · ${(result.durationMs / 1000).toFixed(1)}s` : '';
       const rate = result.tokPerSec ? ` · ${result.tokPerSec} tok/s` : '';
+      const name = result.provider === 'local' ? '🧠 built-in' : '✨ llama-server';
       return {
-        text: `✨ ${result.model || 'llama-server'}${seconds}${rate}`,
+        text: `${name}${result.model ? ` · ${result.model}` : ''}${seconds}${rate}`,
         className: 'badge badge--llama'
       };
     }
@@ -521,6 +597,13 @@
     el.lengthUp.addEventListener('click', () => setTargetWords(state.targetWords + 50));
     el.lengthDown.addEventListener('click', () => setTargetWords(state.targetWords - 50));
     el.lengthRange.addEventListener('input', () => setTargetWords(Number(el.lengthRange.value)));
+    if (el.pacerStyles) {
+      el.pacerStyles.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-pacer-style]');
+        if (button) setPacerStyle(button.dataset.pacerStyle);
+      });
+    }
+
     el.generate.addEventListener('click', generate);
 
     el.topicInput.addEventListener('keydown', (event) => {
@@ -536,6 +619,11 @@
       const index = currentIndex();
       state.pacerY = pacerTargetY(index);
       el.pacer.style.transform = `translateY(${state.pacerY.toFixed(2)}px)`;
+
+      const span = state.spans[index];
+      if (span && el.viewport) {
+        snapScroll(span.offsetTop - el.viewport.clientHeight * 0.3);
+      }
     });
 
     // Click a word to jump the pacer there.
@@ -547,7 +635,10 @@
       state.pacerY = pacerTargetY(state.wordsRead);
       el.pacer.style.transform = `translateY(${state.pacerY.toFixed(2)}px)`;
       paintIndex(state.wordsRead);
-      keepInView(state.wordsRead);
+      const target = state.spans[state.wordsRead];
+      if (target && el.viewport) {
+        snapScroll(target.offsetTop - el.viewport.clientHeight * 0.3);
+      }
       updateReadout();
     });
   }
@@ -600,6 +691,18 @@
   function init() {
     cacheElements();
 
+    // Honour the OS setting: snap instead of easing.
+    try {
+      state.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      window
+        .matchMedia('(prefers-reduced-motion: reduce)')
+        .addEventListener('change', (event) => {
+          state.reduceMotion = event.matches;
+        });
+    } catch {
+      state.reduceMotion = false;
+    }
+
     let stored = NaN;
     let storedWords = NaN;
     try {
@@ -609,6 +712,14 @@
       stored = NaN;
       storedWords = NaN;
     }
+
+    let storedPacer = null;
+    try {
+      storedPacer = window.localStorage.getItem(PACER_STYLE_KEY);
+    } catch {
+      storedPacer = null;
+    }
+    setPacerStyle(storedPacer || 'soft');
 
     setWpm(Number.isFinite(stored) && stored > 0 ? stored : 250);
     setTargetWords(Number.isFinite(storedWords) && storedWords > 0 ? storedWords : 300);
@@ -627,6 +738,14 @@
     setText,
     generate,
     state,
+    /** Re-measure word positions after the tab becomes visible again. */
+    invalidateLayout: () => {
+      invalidatePacerCache();
+      const span = state.spans[currentIndex()];
+      if (span && el.viewport) {
+        snapScroll(span.offsetTop - el.viewport.clientHeight * 0.3);
+      }
+    },
     /** Text produced by /api/generate, reused by the typing tab. */
     getGeneratedText: () => state.generatedText,
     getTopic: () => state.topic

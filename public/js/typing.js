@@ -45,10 +45,10 @@
   const KEY_CLASSES = { shift: 'key--wide', ' ': 'key--space', backspace: 'key--wide' };
 
   const MIN_DRILL = 10;
-  const MAX_DRILL = 60;
+  const MAX_DRILL = 1000;
   const DEFAULT_DRILL = 28;
   const MIN_ESSAY = 50;
-  const MAX_ESSAY = 1200;
+  const MAX_ESSAY = 5000;
   const DEFAULT_ESSAY = 300;
   /** Words built per second of a timed drill (≈130 wpm of headroom). */
   const TIMED_WORDS_PER_SEC = 2.2;
@@ -89,7 +89,10 @@
     caret: null,
     keyNodes: new Map(),
     generating: false,
-    controller: null
+    controller: null,
+    scrollTarget: 0,
+    scrollRaf: null,
+    reduceMotion: false
   };
 
   function cacheElements() {
@@ -131,6 +134,73 @@
     el.favSave = document.getElementById('typing-fav-save');
     el.favDelete = document.getElementById('typing-fav-delete');
     el.favCount = document.getElementById('typing-fav-count');
+  }
+
+  /* ------------------------------------------------------------ scrolling */
+
+  /** Keep the caret's line inside the comfortable band of the viewport. */
+  function scrollCaretIntoView(immediate) {
+    const viewport = el.viewport;
+    if (!viewport || state.spans.length === 0) return;
+
+    const height = viewport.clientHeight;
+    if (height === 0) return;
+
+    const index = Math.min(state.typed.length, state.spans.length - 1);
+    const span = state.spans[index];
+    if (!span) return;
+
+    const maxScroll = Math.max(0, viewport.scrollHeight - height);
+    const lineTop = span.offsetTop;
+    const lineBottom = lineTop + span.offsetHeight;
+
+    // Headroom below the caret so the next line is already visible.
+    const bandTop = state.scrollTarget + height * 0.18;
+    const bandBottom = state.scrollTarget + height * 0.68;
+
+    if (lineTop < bandTop || lineBottom > bandBottom) {
+      state.scrollTarget = clamp(lineTop - height * 0.28, 0, maxScroll);
+    }
+    state.scrollTarget = clamp(state.scrollTarget, 0, maxScroll);
+
+    if (immediate || state.reduceMotion) {
+      cancelScrollAnimation();
+      viewport.scrollTop = state.scrollTarget;
+      return;
+    }
+    animateScroll();
+  }
+
+  function cancelScrollAnimation() {
+    if (state.scrollRaf) {
+      window.cancelAnimationFrame(state.scrollRaf);
+      state.scrollRaf = null;
+    }
+  }
+
+  /** Ease towards the scroll target on the next frames. */
+  function animateScroll() {
+    if (state.scrollRaf) return;
+
+    const step = () => {
+      const viewport = el.viewport;
+      if (!viewport) {
+        state.scrollRaf = null;
+        return;
+      }
+
+      const difference = state.scrollTarget - viewport.scrollTop;
+      if (Math.abs(difference) <= 0.5) {
+        viewport.scrollTop = state.scrollTarget;
+        state.scrollRaf = null;
+        return;
+      }
+
+      viewport.scrollTop += difference * 0.25;
+      state.scrollRaf = window.requestAnimationFrame(step);
+    };
+
+    state.scrollRaf = window.requestAnimationFrame(step);
   }
 
   /* -------------------------------------------------------------- metrics */
@@ -437,6 +507,8 @@
     highlightNextKey();
     updateStatus();
     paintMetrics();
+    cancelScrollAnimation();
+    state.scrollTarget = 0;
     if (el.viewport) el.viewport.scrollTop = 0;
   }
 
@@ -541,6 +613,7 @@
       moveCaret();
       highlightNextKey();
       paintMetrics();
+      scrollCaretIntoView(false);
       return;
     }
 
@@ -576,6 +649,7 @@
     moveCaret();
     highlightNextKey();
     paintMetrics();
+    scrollCaretIntoView(false);
 
     if (state.typed.length >= state.target.length) finish('complete');
   }
@@ -704,10 +778,11 @@
       updateSourceButtons();
       rebuild(false);
 
+      const from = result.provider === 'local' ? 'built-in model' : 'llama-server';
       el.generateStatus.textContent =
         result.source === 'llama'
-          ? `${result.wordCount} words · ${(result.durationMs / 1000).toFixed(1)}s · ready to type`
-          : `Built-in passage (${result.fallbackReason}). Ready to type.`;
+          ? `${result.wordCount} words from the ${from} · ${(result.durationMs / 1000).toFixed(1)}s · ready to type`
+          : `Offline passage (${result.fallbackReason}). Ready to type.`;
     } catch (error) {
       el.generateStatus.textContent =
         error.name === 'AbortError' ? 'Generation cancelled.' : `Generation failed: ${error.message}`;
@@ -895,6 +970,8 @@
 
     el.viewport.addEventListener('click', () => el.viewport.focus());
 
+    window.addEventListener('resize', () => scrollCaretIntoView(true));
+
     document.addEventListener('keydown', handleKeydown);
   }
 
@@ -902,6 +979,17 @@
     cacheElements();
     buildKeyboard();
     loadPrefs();
+
+    try {
+      state.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      window
+        .matchMedia('(prefers-reduced-motion: reduce)')
+        .addEventListener('change', (event) => {
+          state.reduceMotion = event.matches;
+        });
+    } catch {
+      state.reduceMotion = false;
+    }
 
     // Reflect restored preferences in the controls.
     el.optCapitals.checked = state.options.capitals;

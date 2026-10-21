@@ -35,7 +35,10 @@ browser (public/)
       │  fetch /api/*
       ▼
 app.js  (Express 5, binds 127.0.0.1)
-      ├── lib/llama.js ──────────► http://127.0.0.1:8282  (llama-server, OpenAI-compatible)
+      ├── lib/llm.js  (provider registry, chosen via persisted settings)
+      │        ├── lib/llama.js     ──► http://127.0.0.1:8282  (llama-server, OpenAI-compatible)
+      │        └── lib/llm-local.js ──► node-llama-cpp, GGUF in-process (models/model.gguf)
+      │                both ──► lib/essay.js  (shared sanitise/validate/trim)
       │        └── on any failure: lib/fallback-essays.js  (offline essay library)
       └── lib/stats.js  (backend chooser + migration)
                ├── lib/stats-db.js     SQLite (default)      → pacer.db
@@ -76,6 +79,8 @@ Env parsing + Express wiring only; no business logic.
 | `POST /api/stats` | validates + appends → `201 {session, count}`; `400 {error}` |
 | `DELETE /api/stats` | wipes history → `{sessions:[], count:0, total:0, backend, aggregates}` |
 | `/api/*` fallthrough | `404 {error}` via `app.use('/api', ...)` — **never** `app.get('*')` (Express 5 rejects bare `*`) |
+| `GET /api/settings` | `{provider, configured, settings, providers:{server,local}, limits}`. `configured:false` until the user has picked one — the UI opens the picker then |
+| `PUT /api/settings` | `{provider:'server'\|'local'}` → `200`; `400` when missing or invalid. Selecting `local` warms the model in the background |
 | `GET /api/favourites` | `{favourites, count, backend}` — saved passages, newest first |
 | `POST /api/favourites` | `{text, topic?, source?}` → `201 {favourite, duplicate:false}`, or `200 {favourite, duplicate:true}` when the identical text already exists |
 | `DELETE /api/favourites/:id` | `{deleted:true}`, or `404` when the id is unknown |
@@ -241,6 +246,11 @@ Timed drills deliberately over-build so the text never runs out mid-run.
 200ms interval calls `finish('time')` when `secondsLeft() <= 0`; the Time metric
 switches to a countdown and the progress bar tracks time instead of characters.
 
+**Caret auto-scroll** (`scrollCaretIntoView`): after every keystroke the caret's
+line is kept inside the 18–68% band, easing `scrollTop` over a short rAF loop
+(0.25 per frame). `buildText()` cancels any running animation and jumps to the
+top. Without this, a 1000-word drill scrolls the caret out of sight.
+
 **Options are persisted** as one JSON blob under `localStorage['pacer.typing']`
 (`savePrefs`/`loadPrefs`) — source, drillWords, difficulty, timed, durationSec,
 aiWords. Generated text is deliberately *not* persisted.
@@ -257,6 +267,11 @@ State: `words[]`, `spans[]`, `wordsRead` (float), `elapsedMs`, `wpm`,
 
 - `frame()` (rAF) **integrates** `wordsRead += dt * wpm/60` rather than deriving
   it from wall-clock, so changing WPM mid-read doesn't teleport the pacer.
+- **Pacer styles**: `soft` (default), `rainbow`, `off`, persisted in
+  `localStorage['pacer.style']` and applied as `.pacer--<style>`. Soft is 3px at
+  45 % opacity with no animation; the old continuous rainbow shimmer was the
+  main distraction and is gone. `setPacerStyle()` is the only place the classes
+  are touched.
 - `pacerTargetY()` returns the **top edge** of the rule and measures the word's
   **inline text box** (`Range.getBoundingClientRect()`, scroll-invariant after
   subtracting the track rect) so the rule lands in the leading gap *below* the
@@ -270,7 +285,14 @@ State: `words[]`, `spans[]`, `wordsRead` (float), `elapsedMs`, `wpm`,
   was removed for the same reason.
 - Then **lerped**: `pacerY += (target - pacerY) * 0.18` for the smooth glide.
 - `paintIndex()` is O(delta): marks passed words `.rw--done`, one `.rw--current`.
-- `keepInView()` only scrolls when the word leaves the 20–72% band of the viewport.
+- **Auto-scroll** (`updateScroll(dt)`): a target is computed when the current word
+  leaves the 22–72% band and the scroll eases toward it inside the same rAF loop
+  (`1 - exp(-dt*12)`). The band is measured against `state.scrollTarget`, not the
+  live `scrollTop` — using the live value creates a feedback loop that re-targets
+  forever. `snapScroll()` is used for reset/seek/resize.
+  **Never** call `scrollTo({behavior:'smooth'})` per frame: it restarts the
+  browser animation on every tick and stutters. `.reader-viewport` therefore has
+  no CSS `scroll-behavior`.
 - Clicking a word seeks (pauses, sets `wordsRead`, repaints).
 
 ### Typing metrics (`typing.js metrics()`) — the exact formulas
@@ -322,6 +344,51 @@ with `textContent` (never `innerHTML`) — keep it that way.
 
 ---
 
+### `lib/llm.js` — provider registry
+
+`createLlmRouter({config})` builds both providers once and exposes
+`{get(provider), status(), warmLocal(), dispose()}`. `get()` returns the HTTP
+client for `'server'` and the in-process one for `'local'`. `status()` probes
+both (never throws) and feeds the picker.
+
+The choice lives in the settings store, read per request via
+`selectedProvider()` in `app.js`. The built-in model is **never loaded** unless
+`provider === 'local'`.
+
+### `lib/llm-local.js` — in-process GGUF
+
+Uses `node-llama-cpp` (ESM-only, so it is loaded with a **dynamic
+`import()`** from CommonJS — `require()` will not work). Measured on this
+machine with Qwen3-0.6B Q8_0: load ≈ 1.3 s, ≈14 words/s.
+
+Design points that matter:
+- The model is a **process-wide singleton** (`modelPromise`); a **fresh context
+  per request** is created and disposed in `finally`, because reusing one session
+  across prompts made the model answer the *new* prompt as a fresh essay and
+  drift badly.
+- A small model stops early (a 300-word request yields ~120–150 words), so
+  generation **continues in rounds** (`MAX_ROUNDS = 4`, `CONTINUE_PROMPT`) until
+  ≈90% of the target is reached. Measured: 143 → 267 → 391 words.
+- Generations are **serialised** through a promise queue — a CPU-bound model
+  thrashes if requests overlap.
+- No model is auto-detected: `ensureModel()` looks only at the configured path
+  and throws `model-missing` if it is absent.
+- Budget: `budgetFor(words)` = 4 words/s, floor 60 s, cap 20 min.
+
+### `lib/essay.js` — shared output contract
+
+`dedupeRepeatedSentences`, `sanitizeEssay`, `assessEssay`, `minWordsFor`,
+`LlmError`, `REASON_TEXT`, `describeReason`.
+
+`sanitizeEssay` ends by calling `dedupeRepeatedSentences`, which drops a sentence
+when it duplicates an earlier one **or** reuses a 7-word shingle already seen
+(that second rule is what catches paraphrased loops). It bails out and returns
+the original if dedupe would remove more than 60 % of the sentences. This runs on
+model output only — the offline library deliberately repeats templates to reach
+long lengths and must not go through it. Both providers import `assessEssay`, so a completion is
+validated identically no matter where it came from. `lib/llama.js` re-exports
+`LlamaError`/`sanitizeEssay`/`describeReason` for compatibility.
+
 ## 7. Storage
 
 `lib/stats.js → createStats({dbFile, jsonFile, backend, initTimeoutMs, logger})`
@@ -335,6 +402,7 @@ sessions(id TEXT PRIMARY KEY, type TEXT CHECK(type IN ('reading','typing')),
          duration_sec REAL, word_count INTEGER, topic TEXT)
 favourites(id TEXT PRIMARY KEY, text TEXT, topic TEXT, source TEXT,
            word_count INTEGER, created_at TEXT)
+settings(key TEXT PRIMARY KEY, value TEXT)      -- e.g. provider=local
 meta(key TEXT PRIMARY KEY, value TEXT)          -- schema_version (currently 2)
 INDEX idx_sessions_created_at, idx_sessions_type,
       idx_favourites_created_at, idx_favourites_text
@@ -421,6 +489,29 @@ survive "Clear history" on purpose.
    `getState()` shape (`total`/`limit`/`truncated`/`backend`).
 
 ---
+
+10. **`node-llama-cpp` is ESM-only.** Import it with `await import(...)` from
+    CommonJS; `require('node-llama-cpp')` throws `ERR_REQUIRE_ESM`.
+11. **Never reuse a chat session across essays.** A second `prompt()` on the
+    same session is interpreted as a follow-up and returns a different, shorter
+    essay. One context/session per request; continuation prompts are the
+    exception and must be phrased as "continue…".
+12. **The built-in model is opt-in.** Do not warm or load it at startup unless
+    the stored provider is `local` — that is the whole point of the toggle.
+
+13. **`paintIndex()` must clear the span it painted, not `spans[lastIndex]`.**
+    Anything that resets `lastIndex` to `-1` (a tab switch used to) leaves the
+    old `rw--current` class behind, so two words look current. The code tracks
+    `state.currentSpan` for exactly this reason; `main.js` now calls
+    `Pacer.reader.invalidateLayout()` instead of touching `lastIndex`.
+14. **Do not over-tune the small model's repeat penalty.** Measured on
+    Qwen3-0.6B: `penalty 1.3` + 256-token window removes loops but collapses
+    coherence and cut output to ~100 words. The working combination is the mild
+    penalty (`1.12`, default window) **plus** post-generation dedupe, which gave
+    0 % duplicate sentences at full length.
+15. **Scroll animations belong in one loop.** Both tabs ease `scrollTop`
+    themselves; adding CSS `scroll-behavior: smooth` (or repeated `scrollTo`
+    calls) on top reintroduces stutter/stacking.
 
 ## 10. Verification
 

@@ -1,4 +1,4 @@
-# Pacer 🌈
+# Pacer 
 
 A cheerful, local-only **speed reading** and **touch typing** trainer.
 

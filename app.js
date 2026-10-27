@@ -139,6 +139,7 @@ app.get('/api/settings', async (req, res, next) => {
 
     res.json({
       provider,
+      asciiPunctuation: settings.asciiPunctuation !== false,
       // `configured` is false until the user has actually picked one, which is
       // what makes the picker open on first run.
       configured: isProvider(settings.provider),
@@ -156,15 +157,28 @@ app.put('/api/settings', async (req, res, next) => {
   try {
     const body = req.body || {};
 
-    if (body.provider === undefined) {
-      return res.status(400).json({ error: 'Field "provider" is required.' });
+    const patch = {};
+
+    if (body.provider !== undefined) {
+      if (!isProvider(body.provider)) {
+        return res.status(400).json({ error: 'Field "provider" must be "server" or "local".' });
+      }
+      patch.provider = body.provider;
     }
-    if (!isProvider(body.provider)) {
-      return res.status(400).json({ error: 'Field "provider" must be "server" or "local".' });
+
+    if (body.asciiPunctuation !== undefined) {
+      if (typeof body.asciiPunctuation !== 'boolean') {
+        return res.status(400).json({ error: 'Field "asciiPunctuation" must be a boolean.' });
+      }
+      patch.asciiPunctuation = body.asciiPunctuation;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: 'Provide "provider" and/or "asciiPunctuation".' });
     }
 
     const store = await storePromise;
-    const saved = await store.setSettings({ provider: body.provider });
+    const saved = await store.setSettings(patch);
     const provider = isProvider(saved.provider) ? saved.provider : DEFAULT_PROVIDER;
 
     // Loading the built-in model takes a moment; start now so the first essay is quick.
@@ -208,12 +222,17 @@ app.post('/api/generate', async (req, res) => {
 
   const startedAt = Date.now();
   const provider = await selectedProvider();
+  const store = await storePromise;
+  const settings = await store.getSettings();
+  // Default on: curly quotes and em dashes are awkward to read and to type.
+  const asciiPunctuation = settings.asciiPunctuation !== false;
 
   try {
     const client = llm.get(provider);
     const result = await client.generateEssay(topic || 'the little joys of everyday life', {
       targetWords,
-      signal: controller.signal
+      signal: controller.signal,
+      asciiPunctuation
     });
 
     return res.json({
@@ -221,6 +240,7 @@ app.post('/api/generate', async (req, res) => {
       topic: topic || 'the little joys of everyday life',
       source: 'llama',
       provider,
+      asciiPunctuation,
       wordCount: countWords(result.text),
       targetWords: result.targetWords || targetWords,
       model: result.model,

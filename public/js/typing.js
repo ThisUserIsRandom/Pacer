@@ -34,10 +34,31 @@
 
   const HOME_KEYS = new Set(['a', 's', 'd', 'f', 'j', 'k', 'l', ';']);
 
+  /* Every character that should light up the same physical key. Models emit
+     curly punctuation, so the quote key must answer to all of these. */
+  const KEY_ALIASES = {
+    "'": ["'", '\u2018', '\u2019', '\u201A', '\u201B', '\u2032', '`'],
+    ',': [','],
+    '.': ['.']
+  };
+
+  /** Characters we accept as equivalent when checking correctness. */
+  const EQUIVALENT = new Map([
+    ['\u2018', "'"], ['\u2019', "'"], ['\u201A', "'"], ['\u201B', "'"], ['\u2032', "'"],
+    ['\u201C', '"'], ['\u201D', '"'],
+    ['\u2013', '-'], ['\u2014', '-'],
+    ['\u00A0', ' ']
+  ]);
+
+  /** Fold typographic variants so a straight quote matches a curly one. */
+  function foldChar(character) {
+    return EQUIVALENT.get(character) || character;
+  }
+
   const KEY_ROWS = [
     ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
-    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
-    ['z', 'x', 'c', 'v', 'b', 'n', 'm'],
+    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', "'"],
+    ['z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.'],
     ['shift', ' ', 'backspace']
   ];
 
@@ -210,7 +231,8 @@
     let correctChars = 0;
     const compareLength = Math.min(state.typed.length, state.target.length);
     for (let i = 0; i < compareLength; i += 1) {
-      if (state.typed[i] === state.target[i]) correctChars += 1;
+      // Fold curly/straight variants so either keyboard form counts as correct.
+      if (foldChar(state.typed[i]) === foldChar(state.target[i])) correctChars += 1;
     }
 
     const errors = state.totalKeystrokes - state.correctKeystrokes;
@@ -411,7 +433,7 @@
       return;
     }
 
-    const correct = state.typed[index] === state.target[index];
+    const correct = foldChar(state.typed[index]) === foldChar(state.target[index]);
     span.className = `char ${correct ? 'char--correct' : 'char--wrong'}`;
   }
 
@@ -560,9 +582,15 @@
     if (!character) return null;
     if (character === ' ') return ' ';
     if (character === '\n') return null;
-    const lower = character.toLowerCase();
+
+    const folded = foldChar(character);
+    const lower = folded.toLowerCase();
     if (/[a-z]/.test(lower)) return lower;
-    if (HOME_KEYS.has(character)) return character;
+    if (HOME_KEYS.has(folded)) return folded;
+
+    for (const [key, aliases] of Object.entries(KEY_ALIASES)) {
+      if (aliases.includes(character) || aliases.includes(folded)) return key;
+    }
     return null;
   }
 
@@ -597,6 +625,12 @@
   function handleKeydown(event) {
     const main = Pacer.main;
     if (!main || main.activeTab !== 'typing') return;
+
+    /* Never hijack keys aimed at a real form control. This handler preventDefaults
+       printable characters, so without this guard the Topic field on this very tab
+       was impossible to type into. */
+    if (main.isTypingTarget(event.target)) return;
+
     if (event.metaKey || event.ctrlKey || event.altKey) return;
 
     const id = eventKeyId(event);
@@ -642,7 +676,7 @@
     const index = state.typed.length;
     const expectedChar = state.target[index];
     state.totalKeystrokes += 1;
-    if (event.key === expectedChar) state.correctKeystrokes += 1;
+    if (foldChar(event.key) === foldChar(expectedChar)) state.correctKeystrokes += 1;
 
     state.typed += event.key;
     paintAround(index);

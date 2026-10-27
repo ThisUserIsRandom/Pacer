@@ -218,7 +218,12 @@ knowing, because they were learned the hard way with a local thinking model:
 3. **Output is validated**: empty text, reasoning-only responses, and anything
    under half the requested length are rejected.
 4. **Length is normalised** to the target — the model tends to overshoot.
-5. **Repeated material is removed.** Small models loop on rhetorical templates
+5. **Punctuation is normalised to ASCII** — curly apostrophes/quotes,
+   em/en dashes and ellipses become `'`, `"`, `-` and `...`. Curly punctuation is
+   awkward to read in a pacer and impossible to type on a physical keyboard
+   (the `'` key produces a straight quote, which never matched `’`). Turn it off
+   with the `asciiPunctuation` setting if you prefer the original characters.
+6. **Repeated material is removed.** Small models loop on rhetorical templates
    ("we are reminded that…") and restate them with slight paraphrases. After
    generation, `lib/essay.js` drops sentences that duplicate an earlier one
    *or* reuse a 7-word run already seen, so paraphrased repeats are caught too.

@@ -211,8 +211,17 @@ INPUT/TEXTAREA/SELECT/contenteditable.
   `!isTypingTarget(event.target)`; always `preventDefault()` on Space so the page
   never scrolls.
 - **Typing input** (`typing.js handleKeydown`): document-level, fires only when
-  `activeTab === 'typing'`. Uses `event.code` (`KeyA→'a'`, `Space→' '`,
-  `ShiftLeft/Right→'shift'`) via `eventKeyId()`. Paste/cut/drag-drop blocked.
+  `activeTab === 'typing'` **and** `!isTypingTarget(event.target)`. It
+  `preventDefault()`s printable characters, so the input guard is mandatory —
+  without it the Topic field on this same tab cannot be typed into. Uses
+  `event.code` (`KeyA→'a'`, `Space→' '`, `ShiftLeft/Right→'shift'`) via
+  `eventKeyId()`. Paste/cut/drag-drop blocked.
+
+> **Any document-level `keydown` handler must start with the `activeTab` check
+> AND `isTypingTarget(event.target)`.** Both tab handlers need it; forgetting the
+> second made every form field on the typing tab read-only. Field-scoped handlers
+> (Enter-to-generate on the topic inputs) are fine because they never see another
+> element's events.
 
 Each module owns its own DOM ids (see the `getElementById` calls in
 `cacheElements()`); ids are namespaced per tab (`reading-*`, `typing-*`,
@@ -389,8 +398,13 @@ Design points that matter:
 
 ### `lib/essay.js` — shared output contract
 
-`dedupeRepeatedSentences`, `sanitizeEssay`, `assessEssay`, `minWordsFor`,
-`LlmError`, `REASON_TEXT`, `describeReason`.
+`normalizePunctuation`, `dedupeRepeatedSentences`, `sanitizeEssay`, `assessEssay`,
+`minWordsFor`, `LlmError`, `REASON_TEXT`, `describeReason`.
+
+`normalizePunctuation` maps curly quotes/dashes/ellipses to ASCII, and
+`sanitizeEssay` applies it unless `{ asciiPunctuation: false }` is passed. The
+flag is driven by the `asciiPunctuation` setting (default on) through
+`assessEssay` in both providers.
 
 `sanitizeEssay` ends by calling `dedupeRepeatedSentences`, which drops a sentence
 when it duplicates an earlier one **or** reuses a 7-word shingle already seen
@@ -526,7 +540,16 @@ survive "Clear history" on purpose.
     coherence and cut output to ~100 words. The working combination is the mild
     penalty (`1.12`, default window) **plus** post-generation dedupe, which gave
     0 % duplicate sentences at full length.
-17. **Scroll animations belong in one loop.** Both tabs ease `scrollTop`
+17. **A `document` keydown handler that `preventDefault()`s printable keys will
+    silently make every input read-only.** `typing.js` did exactly this: `W`, Space
+    and Backspace were swallowed on the typing tab, so its own Topic prompt box
+    could not be typed into. Always guard with `Pacer.main.isTypingTarget(event.target)`.
+18. **Curly vs straight punctuation is a correctness bug, not cosmetics.** Model
+    output used `’` while a physical keyboard emits `'`, so drill characters could
+    never match and `keyIdFor()` returned `null` (no key highlighted). Fixed on
+    both ends: ASCII output by default, and `foldChar()` in `typing.js` treats the
+    variants as equal when scoring.
+19. **Scroll animations belong in one loop.** Both tabs ease `scrollTop`
     themselves; adding CSS `scroll-behavior: smooth` (or repeated `scrollTo`
     calls) on top reintroduces stutter/stacking.
 
@@ -571,6 +594,7 @@ instance running (see below), so start it and point a second server at it.
 | Change favourite fields/bounds | `lib/stats-store.js` (`validateFavourite`) → both backends inherit; mirror any column change in both `SCHEMA` and `rowToFavourite` |
 | New aggregation for the dashboard | `lib/stats-db.js` (SQL) **and** `lib/stats-store.js` (`computeAggregates`), then `analytics.js` |
 | New typing drill option | `public/index.html` (control) → `typing.js` (`state` + `loadPrefs`/`savePrefs` + `rebuild`) → `public/js/typing-options` test |
+| Punctuation normalisation | `PUNCTUATION_MAP` in `lib/essay.js`; the typing tab's `EQUIVALENT`/`foldChar` in `public/js/typing.js` must stay in sync |
 | New typing source | `typing.js` (`buildDrillText`, `SOURCE_LABELS`, `setSource`) + a button in `#typing-sources` |
 | Favourites behaviour | `public/js/favourites.js` (widget + `broadcast`) — remember both tabs share it |
 | Prompt / model call tuning | `lib/llama.js` (`buildBody`, `generateEssay`) |

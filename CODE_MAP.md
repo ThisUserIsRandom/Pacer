@@ -366,9 +366,21 @@ Design points that matter:
   per request** is created and disposed in `finally`, because reusing one session
   across prompts made the model answer the *new* prompt as a fresh essay and
   drift badly.
-- A small model stops early (a 300-word request yields ~120–150 words), so
-  generation **continues in rounds** (`MAX_ROUNDS = 4`, `CONTINUE_PROMPT`) until
-  ≈90% of the target is reached. Measured: 143 → 267 → 391 words.
+- A small model stops early (a 300-word request yields ~60–200 words), so
+  generation **continues in rounds** until ≈90% of the target is reached.
+  `MAX_ROUNDS = 24` and each round starts a **fresh session** on the *same*
+  sequence with a **rotating** continuation prompt.
+- **Sequence reuse matters:** `LlamaChatSession` does not dispose its sequence
+  unless `autoDisposeSequence` is set (default `false`), so creating a session
+  per round threw "No sequences left". Take one `context.getSequence()` and pass
+  it to every session.
+- **Do not prime the fresh session** with the essay tail (e.g. "reply OK").
+  Measured: priming collapses rounds to ~32 words and often stalls at 0, while a
+  bare fresh session reaches 280–304 words.
+- **Empty rounds are retried, not treated as a loop.** A blank round used to end
+  generation outright, which discarded a whole essay (and for a 50-word request
+  failed the minimum length entirely). Up to 3 consecutive empty rounds are
+  retried before giving up.
 - Generations are **serialised** through a promise queue — a CPU-bound model
   thrashes if requests overlap.
 - No model is auto-detected: `ensureModel()` looks only at the configured path
@@ -504,12 +516,17 @@ survive "Clear history" on purpose.
     old `rw--current` class behind, so two words look current. The code tracks
     `state.currentSpan` for exactly this reason; `main.js` now calls
     `Pacer.reader.invalidateLayout()` instead of touching `lastIndex`.
-14. **Do not over-tune the small model's repeat penalty.** Measured on
+14. **`LlamaChatSession` leaks sequences.** `autoDisposeSequence` defaults to
+    `false`; one context has a limited pool, so per-round sessions fail with
+    "No sequences left". Reuse a single `context.getSequence()`.
+15. **A blank completion is a bad sample, not a stop signal.** Retry it — the
+    first round of a short request comes back empty often enough to matter.
+16. **Do not over-tune the small model's repeat penalty.** Measured on
     Qwen3-0.6B: `penalty 1.3` + 256-token window removes loops but collapses
     coherence and cut output to ~100 words. The working combination is the mild
     penalty (`1.12`, default window) **plus** post-generation dedupe, which gave
     0 % duplicate sentences at full length.
-15. **Scroll animations belong in one loop.** Both tabs ease `scrollTop`
+17. **Scroll animations belong in one loop.** Both tabs ease `scrollTop`
     themselves; adding CSS `scroll-behavior: smooth` (or repeated `scrollTo`
     calls) on top reintroduces stutter/stacking.
 

@@ -194,8 +194,10 @@ you set it. It never scans for models, and the model is **only loaded when you
 pick the built-in option** (≈1.3 s, stays resident afterwards).
 
 A small model like Qwen3-0.6B writes short passages on its own, so Pacer asks it
-to continue until the requested length is (roughly) reached — a 300-word request
-arrives in about 20 s on a 12-core CPU.
+to continue — each round on a clean history with a differently worded prompt —
+until the requested length is (roughly) reached. Measured on a 12-core CPU:
+**10/10 runs landed at 272–308 words in ~25 s**, a 1000-word request reaches
+~930 words in ~80 s, and short 50-word requests work too.
 
 If the model file is missing, generating still works: you get the built-in
 offline essay and the reason is shown in the badge.
